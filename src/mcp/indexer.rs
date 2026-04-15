@@ -491,6 +491,20 @@ pub async fn index_codebase(
 
     info!("Inserted {} vectors into Milvus", vectors_inserted);
 
+    if vectors_inserted == 0 {
+        update_status_failed(state).await;
+        anyhow::bail!(
+            "Generated {} chunks and {} embeddings, but inserted 0 vectors into Milvus{}",
+            total_chunks,
+            embeddings_generated,
+            if warnings.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", warnings.join("; "))
+            }
+        );
+    }
+
     if let Err(e) =
         state
             .manifest_store
@@ -1012,6 +1026,78 @@ mod tests {
         assert!(first_result.chunks_created > 0);
         assert_eq!(forced_result.files_processed, 2);
         assert!(forced_result.chunks_created > 0);
+
+        embedding.wait().await;
+        milvus.wait().await;
+    }
+
+    #[tokio::test]
+    async fn test_index_fails_when_no_vectors_are_inserted() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        let cache_dir = TempDir::new().unwrap();
+        let _cache_lock = set_test_cache_dir_async(cache_dir.path()).await;
+        fs::write(root.join("main.py"), "def add(a, b):\n    return a + b\n").unwrap();
+
+        let milvus = spawn_mock_json_server(HashMap::from([
+            (
+                "/v2/vectordb/collections/has",
+                serde_json::json!({
+                    "code": 0,
+                    "data": {"has": false}
+                }),
+            ),
+            (
+                "/v2/vectordb/collections/create",
+                serde_json::json!({
+                    "code": 0
+                }),
+            ),
+            (
+                "/v2/vectordb/entities/insert",
+                serde_json::json!({
+                    "code": 1,
+                    "message": "insert rejected"
+                }),
+            ),
+            (
+                "/v2/vectordb/entities/delete",
+                serde_json::json!({
+                    "code": 0
+                }),
+            ),
+        ]))
+        .await;
+        let embedding = spawn_mock_embedding_server(serde_json::json!({
+            "data": [
+                {"embedding": [0.1, 0.2, 0.3]}
+            ]
+        }))
+        .await;
+
+        let state = IndexerState {
+            indexing_status: Arc::new(RwLock::new(IndexStatus::default())),
+            walker: Arc::new(CodeWalker::new()),
+            splitter: Arc::new(CodeSplitter::new(SplitterConfig {
+                root_path: root.to_path_buf(),
+                max_chunk_bytes: Config::default().chunk_size,
+                overlap_lines: Config::default().chunk_overlap / 80,
+                ..SplitterConfig::default()
+            })),
+            embedding_client: Arc::new(EmbeddingClient::new(EmbeddingConfig {
+                url: format!("{}/v1/embeddings", embedding.base_url),
+                model: "test".to_string(),
+                batch_size: 100,
+                api_key: None,
+            })),
+            milvus_client: Arc::new(MilvusClient::new(&milvus.base_url, None)),
+            manifest_store: ManifestStore,
+            embedding_dimension: 3,
+        };
+
+        let err = index_codebase(&state, root, true).await.unwrap_err();
+        assert!(err.to_string().contains("inserted 0 vectors into Milvus"));
+        assert_eq!(state.get_status().await.status, IndexState::Failed);
 
         embedding.wait().await;
         milvus.wait().await;

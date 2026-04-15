@@ -19,6 +19,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::task;
+use tokio::time::{sleep, Duration};
 
 use super::indexer::{self, IndexerState};
 use super::hybrid::{fuse_hybrid_hits, HybridFusionOptions, HybridHit};
@@ -79,6 +80,24 @@ fn create_indexer_state(config: &Config, root_path: &Path) -> Arc<IndexerState> 
         MilvusClient::new(&config.milvus_url, config.milvus_token.clone()),
         config.embedding_dimension,
     ))
+}
+
+fn mirror_index_status(
+    shared_state: SharedState,
+    indexer_state: Arc<IndexerState>,
+    path: PathBuf,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let status = indexer_state.get_status().await;
+            let done = !matches!(status.status, crate::types::IndexState::Indexing);
+            shared_state.set_status(path.clone(), status);
+            if done {
+                break;
+            }
+            sleep(Duration::from_millis(250)).await;
+        }
+    })
 }
 
 /// Parameters for checking indexing status.
@@ -293,9 +312,19 @@ impl CodebaseTools {
         }
 
         let indexer_state = create_indexer_state(&self.state.config, &path);
-        let result = indexer::index_codebase(&indexer_state, &path, params.force)
-            .await
-            .map_err(|err| McpError::internal_error(err.to_string(), None))?;
+        self.state.set_status(
+            path.clone(),
+            IndexStatus {
+                total_files: 0,
+                processed_files: 0,
+                total_chunks: 0,
+                status: crate::types::IndexState::Indexing,
+            },
+        );
+        let status_mirror = mirror_index_status(self.state.clone(), indexer_state.clone(), path.clone());
+        let result = indexer::index_codebase(&indexer_state, &path, params.force).await;
+        let _ = status_mirror.await;
+        let result = result.map_err(|err| McpError::internal_error(err.to_string(), None))?;
 
         Ok(Json(IndexResult {
             success: true,
@@ -484,6 +513,7 @@ impl CodebaseTools {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::io;
     use std::path::PathBuf;
 
@@ -518,33 +548,50 @@ mod tests {
         expected_path: &'static str,
         response_body: serde_json::Value,
     ) -> MockHttpServer {
+        spawn_mock_json_server_map_with_limit(HashMap::from([(expected_path, response_body)]), 1)
+            .await
+    }
+
+    async fn spawn_mock_json_server_map_with_limit(
+        responses: HashMap<&'static str, serde_json::Value>,
+        max_requests: usize,
+    ) -> MockHttpServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let body = response_body.to_string();
         let handle = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let request = read_http_request(&mut stream).await.unwrap();
-            let status = if request.starts_with("POST ")
-                && request
+            let mut served_requests = 0usize;
+            loop {
+                let accept =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+                        .await;
+                let Ok(Ok((mut stream, _))) = accept else {
+                    break;
+                };
+
+                let request = read_http_request(&mut stream).await.unwrap();
+                let matched = request
                     .lines()
                     .next()
-                    .is_some_and(|line| line.contains(expected_path))
-            {
-                "200 OK"
-            } else {
-                "404 Not Found"
-            };
-            let response_body = if status == "200 OK" {
-                body
-            } else {
-                r#"{"code":404,"message":"not found"}"#.to_string()
-            };
-            let response = format!(
-                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                response_body.len(),
-                response_body
-            );
-            stream.write_all(response.as_bytes()).await.unwrap();
+                    .and_then(|line| responses.iter().find(|(path, _)| line.contains(*path)));
+                let (status, response_body) = if let Some((_, body)) = matched {
+                    ("200 OK", body.to_string())
+                } else {
+                    (
+                        "404 Not Found",
+                        r#"{"code":404,"message":"not found"}"#.to_string(),
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                served_requests += 1;
+                if served_requests >= max_requests {
+                    break;
+                }
+            }
         });
 
         MockHttpServer {
@@ -785,6 +832,82 @@ mod tests {
             repo_dir.path().join("src/lib.rs")
         );
         assert!(results.results[0].score > 0.0);
+
+        embedding.wait().await;
+        milvus.wait().await;
+    }
+
+    #[tokio::test]
+    async fn test_index_codebase_updates_shared_status() {
+        let milvus = spawn_mock_json_server_map_with_limit(HashMap::from([
+            (
+                "/v2/vectordb/collections/has",
+                serde_json::json!({
+                    "code": 0,
+                    "data": {"has": false}
+                }),
+            ),
+            (
+                "/v2/vectordb/collections/create",
+                serde_json::json!({
+                    "code": 0
+                }),
+            ),
+            (
+                "/v2/vectordb/entities/insert",
+                serde_json::json!({
+                    "code": 0
+                }),
+            ),
+            (
+                "/v2/vectordb/entities/delete",
+                serde_json::json!({
+                    "code": 0
+                }),
+            ),
+        ]), 8)
+        .await;
+        let embedding = spawn_mock_embedding_server(serde_json::json!({
+            "data": [{"embedding": [0.1, 0.2, 0.3]}],
+            "model": "test",
+            "usage": {"prompt_tokens": 5, "total_tokens": 5}
+        }))
+        .await;
+
+        let repo_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let _cache_guard = set_test_cache_dir_async(cache_dir.path()).await;
+        std::fs::write(repo_dir.path().join("main.py"), "def add(a, b):\n    return a + b\n").unwrap();
+
+        let config = Config {
+            embedding_url: embedding.base_url.clone(),
+            embedding_model: "test".to_string(),
+            milvus_url: milvus.base_url.clone(),
+            embedding_dimension: 3,
+            ..Config::default()
+        };
+        let tools = CodebaseTools::with_state(create_shared_state(config));
+
+        let Json(result) = tools
+            .index_codebase(Parameters(IndexCodebaseParams {
+                path: repo_dir.path().to_string_lossy().into_owned(),
+                force: true,
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.success);
+
+        let Json(status) = tools
+            .get_indexing_status(Parameters(GetIndexingStatusParams {
+                path: repo_dir.path().to_string_lossy().into_owned(),
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(status.status, crate::types::IndexState::Completed);
+        assert_eq!(status.processed_files, 1);
+        assert_eq!(status.total_chunks, 1);
 
         embedding.wait().await;
         milvus.wait().await;
