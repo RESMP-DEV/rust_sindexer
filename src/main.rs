@@ -13,7 +13,7 @@ async fn main() -> Result<()> {
         .with(EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()))
         .init();
 
-    tracing::info!("Starting rust-sindexer MCP server");
+    tracing::info!("Starting rust_sindexer MCP server");
 
     // Create the tool handler and wrap in Router
     let config = Config::from_env();

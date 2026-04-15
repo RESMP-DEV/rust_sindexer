@@ -36,7 +36,6 @@ pub struct SearchHit {
 pub struct MilvusClient {
     client: Client,
     base_url: String,
-    token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -174,7 +173,6 @@ impl MilvusClient {
         Self {
             client,
             base_url: base_url.to_string(),
-            token,
         }
     }
 

@@ -23,7 +23,7 @@ fn collect_files(root: &Path) -> Vec<PathBuf> {
         for entry in entries {
             // Skip the manifest directory
             if entry.is_dir() {
-                if entry.file_name().map_or(false, |name| name == ".rust-sindexer") {
+                if entry.file_name().map_or(false, |name| name == ".rust_sindexer") {
                     continue;
                 }
                 visit(&entry, root, out);

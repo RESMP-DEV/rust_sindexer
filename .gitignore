@@ -25,3 +25,4 @@ target
 agent_workspace/
 logs/
 reports/
+tasks/

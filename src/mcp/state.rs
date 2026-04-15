@@ -89,7 +89,7 @@ impl ContextState {
             config,
             embedding_client,
             milvus_client,
-            manifest_store: Arc::new(ManifestStore::default()),
+            manifest_store: Arc::new(ManifestStore),
             indexing_status: DashMap::new(),
             splitter,
         }
