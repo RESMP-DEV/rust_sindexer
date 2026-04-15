@@ -3,7 +3,7 @@
 # Independent tasks that expand language support, embedding providers,
 # and cloud connectivity. All parallelizable — no inter-dependencies.
 #
-# SCOPE: contrib/RClaude-Context only.
+# SCOPE: contrib/rust_sindexer only.
 # DEPENDS ON: None (independent of Phases 1-3, but best done after Phase 1)
 
 tasks:
@@ -16,7 +16,7 @@ tasks:
       Add tree-sitter language grammars for Ruby, PHP, Swift, Kotlin, Scala, C#.
 
       CONTEXT:
-      The upstream claude-context supports 14 languages. RClaude-Context has 9:
+      The upstream claude-context supports 14 languages. rust_sindexer has 9:
       Python, JavaScript, TypeScript, TSX, Rust, Go, Java, C++, C.
       Missing: Ruby, PHP, Swift, Kotlin, Scala, C#.
 
@@ -61,7 +61,7 @@ tasks:
       - src/splitter/parsers.rs (existing parser init pattern)
       - src/splitter/node_types.rs (existing node type definitions)
       - src/config.rs SUPPORTED_EXTENSIONS (line 5)
-    verify_command: cd contrib/RClaude-Context && cargo test splitter 2>&1 | tail -10
+    verify_command: cd contrib/rust_sindexer && cargo test splitter 2>&1 | tail -10
 
   # ============================================
   # P4-T2: Zilliz Cloud token auth support
@@ -110,7 +110,7 @@ tasks:
 
       Do NOT change the Milvus REST API URLs or request bodies.
       The API is identical — only auth headers differ.
-    verify_command: cd contrib/RClaude-Context && cargo check 2>&1 | tail -5
+    verify_command: cd contrib/rust_sindexer && cargo check 2>&1 | tail -5
 
   # ============================================
   # P4-T3: Multiple embedding provider support
@@ -161,7 +161,7 @@ tasks:
 
       Do NOT add provider enums or complex abstractions.
       The OpenAI-compatible format + optional Bearer auth covers all providers.
-    verify_command: cd contrib/RClaude-Context && cargo check 2>&1 | tail -5
+    verify_command: cd contrib/rust_sindexer && cargo check 2>&1 | tail -5
 
   # ============================================
   # P4-T4: Add Markdown and YAML splitter fallback
@@ -195,4 +195,4 @@ tasks:
       REFERENCE:
       - src/splitter/mod.rs (split_file method)
       - src/splitter/refine.rs (chunk splitting logic)
-    verify_command: cd contrib/RClaude-Context && cargo test splitter 2>&1 | tail -10
+    verify_command: cd contrib/rust_sindexer && cargo test splitter 2>&1 | tail -10

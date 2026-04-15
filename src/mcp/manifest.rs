@@ -185,7 +185,7 @@ fn fingerprint_files(root: &Path, files: &[PathBuf]) -> Result<Vec<FileFingerpri
 }
 
 fn manifest_path(root: &Path) -> PathBuf {
-    root.join(".rclaude-context").join("index-manifest.json")
+    root.join(".rust-sindexer").join("index-manifest.json")
 }
 
 #[cfg(test)]

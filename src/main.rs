@@ -1,7 +1,7 @@
 use anyhow::Result;
-use rclaude_context::config::Config;
-use rclaude_context::mcp::create_shared_state;
-use rclaude_context::mcp::CodebaseTools;
+use rust_sindexer::config::Config;
+use rust_sindexer::mcp::create_shared_state;
+use rust_sindexer::mcp::CodebaseTools;
 use rmcp::{handler::server::router::Router, ServiceExt};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -13,7 +13,7 @@ async fn main() -> Result<()> {
         .with(EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()))
         .init();
 
-    tracing::info!("Starting rclaude-context MCP server");
+    tracing::info!("Starting rust-sindexer MCP server");
 
     // Create the tool handler and wrap in Router
     let config = Config::from_env();

@@ -1,4 +1,4 @@
-# RClaude-Context
+# rust_sindexer (Rust Semantic Indexer)
 
 High-performance Rust MCP server for semantic code indexing. Replaces the JS-based Claude Context MCP with a single native binary — no Node.js overhead, no per-agent CPU cost. One persistent process handles indexing + search for the entire fleet.
 
@@ -57,7 +57,7 @@ Reciprocal Rank Fusion (RRF) combining semantic (Milvus) and lexical (BM25) resu
 
 ### Incremental Indexing (`src/mcp/manifest.rs`)
 
-File-hash manifest stored at `.rclaude-context/index-manifest.json`. Tracks SHA-256 per file to skip unchanged files on reindex. Supports force-reindex to bypass the manifest.
+File-hash manifest stored at `.rust-sindexer/index-manifest.json`. Tracks SHA-256 per file to skip unchanged files on reindex. Supports force-reindex to bypass the manifest.
 
 ## Key Files
 
@@ -84,7 +84,7 @@ File-hash manifest stored at `.rclaude-context/index-manifest.json`. Tracks SHA-
 cargo build --release
 
 # Run as MCP server (stdio transport)
-./target/release/rclaude-context
+./target/release/rust-sindexer
 ```
 
 The server communicates via stdin/stdout. Configure in Claude Code's MCP settings.

@@ -4,7 +4,7 @@
 # search leg. The hybrid fusion in hybrid.rs already accepts lexical_hits
 # but nothing produces them.
 #
-# SCOPE: contrib/RClaude-Context only.
+# SCOPE: contrib/rust_sindexer only.
 # DEPENDS ON: phase2_hybrid_incremental.yaml (hybrid fusion wired)
 
 tasks:
@@ -27,9 +27,9 @@ tasks:
       start_line (U64 stored), end_line (U64 stored), language (STRING stored).
 
       Add `pub mod lexical;` to src/lib.rs. Store indexes in
-      `~/.cache/rclaude-context/lexical-indexes/<sha256-of-path>/`.
+      `~/.cache/rust-sindexer/lexical-indexes/<sha256-of-path>/`.
       See src/mcp/manifest.rs line 310 for the cache directory pattern.
-    verify_command: cd contrib/RClaude-Context && cargo check 2>&1 | tail -5
+    verify_command: cd contrib/rust_sindexer && cargo check 2>&1 | tail -5
 
   # ============================================
   # P3-T1b: Add insert, delete, search, clear methods
@@ -51,7 +51,7 @@ tasks:
       HybridHit is defined in src/mcp/hybrid.rs line 7.
       CodeChunk is defined in src/types.rs.
       Use default tantivy tokenizer. Keep it simple.
-    verify_command: cd contrib/RClaude-Context && cargo check 2>&1 | tail -5
+    verify_command: cd contrib/rust_sindexer && cargo check 2>&1 | tail -5
 
   # ============================================
   # P3-T2: Wire lexical index into indexer pipeline
@@ -71,7 +71,7 @@ tasks:
 
       Reference: src/mcp/indexer.rs Phase 4 at line 301,
       src/mcp/tools.rs clear_index at line 381.
-    verify_command: cd contrib/RClaude-Context && cargo check 2>&1 | tail -5
+    verify_command: cd contrib/rust_sindexer && cargo check 2>&1 | tail -5
 
   # ============================================
   # P3-T3: Wire lexical search into search_code
@@ -90,7 +90,7 @@ tasks:
 
       Fall back to empty lexical hits if index doesn't exist yet.
       Reference: src/mcp/tools.rs search_code, src/mcp/hybrid.rs fuse_hybrid_hits.
-    verify_command: cd contrib/RClaude-Context && cargo test 2>&1 | tail -5
+    verify_command: cd contrib/rust_sindexer && cargo test 2>&1 | tail -5
 
   # ============================================
   # P3-T4a: Test insert and search
@@ -110,7 +110,7 @@ tasks:
          and "score is computed", search "calculate_score", assert exact first
 
       Use tempfile::TempDir for index directories.
-    verify_command: cd contrib/RClaude-Context && cargo test lexical 2>&1 | tail -10
+    verify_command: cd contrib/rust_sindexer && cargo test lexical 2>&1 | tail -10
 
   # ============================================
   # P3-T4b: Test delete and clear
@@ -128,7 +128,7 @@ tasks:
       2. test_clear — insert chunks, call clear(), assert search returns empty
 
       Use tempfile::TempDir for index directories.
-    verify_command: cd contrib/RClaude-Context && cargo test lexical 2>&1 | tail -10
+    verify_command: cd contrib/rust_sindexer && cargo test lexical 2>&1 | tail -10
 
   # ============================================
   # PHASE GATE
@@ -150,4 +150,4 @@ tasks:
 
       If all pass, print "PHASE 3 COMPLETE — hybrid BM25+vector search live"
     verify_command: |
-      cd contrib/RClaude-Context && cargo test 2>&1 | tail -3 && test -f src/lexical/mod.rs && grep -q "tantivy" Cargo.toml && echo "PHASE 3 GATE PASSED"
+      cd contrib/rust_sindexer && cargo test 2>&1 | tail -3 && test -f src/lexical/mod.rs && grep -q "tantivy" Cargo.toml && echo "PHASE 3 GATE PASSED"

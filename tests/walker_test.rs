@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use ignore::WalkBuilder;
-use rclaude_context::walker::CodeWalker;
+use rust_sindexer::walker::CodeWalker;
 use tempfile::TempDir;
 
 /// Create a test file with given content

@@ -4,8 +4,8 @@
 # These tasks wire the existing Milvus client and SharedState
 # into the tool handler so search actually works.
 #
-# SCOPE: contrib/RClaude-Context only.
-# All file paths are relative to contrib/RClaude-Context.
+# SCOPE: contrib/rust_sindexer only.
+# All file paths are relative to contrib/rust_sindexer.
 
 tasks:
   # ============================================
@@ -39,7 +39,7 @@ tasks:
       - src/mcp/mod.rs (update re-exports)
       - src/mcp/state.rs (has the real search impl at line 185)
       - src/mcp/tools.rs (does NOT import from searcher)
-    verify_command: cd contrib/RClaude-Context && cargo check 2>&1 | tail -5
+    verify_command: cd contrib/rust_sindexer && cargo check 2>&1 | tail -5
 
   # ============================================
   # P1-T2: Auto-create Milvus collection on index
@@ -75,7 +75,7 @@ tasks:
         own ContextState (not SharedState)
 
       Do NOT add new dependencies. The existing MilvusClient API is sufficient.
-    verify_command: cd contrib/RClaude-Context && cargo check 2>&1 | tail -5
+    verify_command: cd contrib/rust_sindexer && cargo check 2>&1 | tail -5
 
   # ============================================
   # P1-T3: Wire search_code tool to SharedState
@@ -125,7 +125,7 @@ tasks:
       - src/mcp/tools.rs (modify search_code at line 337)
       - src/mcp/state.rs (search method at line 185)
       - src/vectordb/client.rs (MilvusClient::search at line 289)
-    verify_command: cd contrib/RClaude-Context && cargo check 2>&1 | tail -5
+    verify_command: cd contrib/rust_sindexer && cargo check 2>&1 | tail -5
 
   # ============================================
   # P1-T4: Add search_code unit tests
@@ -194,7 +194,7 @@ tasks:
 
       Reuse the MockMilvusServer pattern but extend it to handle
       both embedding and Milvus endpoints (may need two mock servers).
-    verify_command: cd contrib/RClaude-Context && cargo test search_code 2>&1 | tail -10
+    verify_command: cd contrib/rust_sindexer && cargo test search_code 2>&1 | tail -10
 
   # ============================================
   # PHASE GATE
@@ -218,4 +218,4 @@ tasks:
 
       If all pass, print "PHASE 1 COMPLETE — search_code is live"
     verify_command: |
-      cd contrib/RClaude-Context && cargo test 2>&1 | tail -3 && ! grep -q "TODO" src/mcp/tools.rs && echo "PHASE 1 GATE PASSED"
+      cd contrib/rust_sindexer && cargo test 2>&1 | tail -3 && ! grep -q "TODO" src/mcp/tools.rs && echo "PHASE 1 GATE PASSED"

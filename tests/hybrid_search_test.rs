@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use rclaude_context::mcp::hybrid::{fuse_hybrid_hits, HybridFusionOptions, HybridHit};
-use rclaude_context::types::CodeChunk;
+use rust_sindexer::mcp::hybrid::{fuse_hybrid_hits, HybridFusionOptions, HybridHit};
+use rust_sindexer::types::CodeChunk;
 
 fn chunk(id: &str, relative_path: &str, content: &str, start_line: u32) -> CodeChunk {
     CodeChunk {

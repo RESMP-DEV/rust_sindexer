@@ -1393,47 +1393,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rclaude-context"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dashmap",
- "hex",
- "ignore",
- "once_cell",
- "parking_lot",
- "rayon",
- "reqwest",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "sha2",
- "tantivy",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "tree-sitter",
- "tree-sitter-c",
- "tree-sitter-c-sharp",
- "tree-sitter-cpp",
- "tree-sitter-go",
- "tree-sitter-java",
- "tree-sitter-javascript",
- "tree-sitter-php",
- "tree-sitter-python",
- "tree-sitter-ruby",
- "tree-sitter-rust",
- "tree-sitter-scala",
- "tree-sitter-swift",
- "tree-sitter-typescript",
- "uuid",
-]
-
-[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1576,6 +1535,47 @@ dependencies = [
  "quote",
  "serde_json",
  "syn",
+]
+
+[[package]]
+name = "rust-sindexer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dashmap",
+ "hex",
+ "ignore",
+ "once_cell",
+ "parking_lot",
+ "rayon",
+ "reqwest",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tantivy",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "tree-sitter",
+ "tree-sitter-c",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cpp",
+ "tree-sitter-go",
+ "tree-sitter-java",
+ "tree-sitter-javascript",
+ "tree-sitter-php",
+ "tree-sitter-python",
+ "tree-sitter-ruby",
+ "tree-sitter-rust",
+ "tree-sitter-scala",
+ "tree-sitter-swift",
+ "tree-sitter-typescript",
+ "uuid",
 ]
 
 [[package]]

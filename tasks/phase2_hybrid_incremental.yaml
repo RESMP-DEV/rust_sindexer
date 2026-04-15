@@ -4,7 +4,7 @@
 # and manifest-based incremental indexing that are already implemented
 # but not connected to the tool layer.
 #
-# SCOPE: contrib/RClaude-Context only.
+# SCOPE: contrib/rust_sindexer only.
 # DEPENDS ON: phase1_search_core.yaml (all tasks complete)
 
 tasks:
@@ -56,7 +56,7 @@ tasks:
       - src/mcp/hybrid.rs (fuse_hybrid_hits at line 73)
       - src/mcp/tools.rs (search_code method)
       - tests/hybrid_search_test.rs (existing tests)
-    verify_command: cd contrib/RClaude-Context && cargo test 2>&1 | tail -5
+    verify_command: cd contrib/rust_sindexer && cargo test 2>&1 | tail -5
 
   # ============================================
   # P2-T2: Wire incremental indexing via manifests
@@ -120,7 +120,7 @@ tasks:
       - src/mcp/manifest.rs (ManifestStore, diff functions)
       - src/vectordb/client.rs (delete method at line 351)
       - tests/index_manifest_test.rs (existing manifest tests)
-    verify_command: cd contrib/RClaude-Context && cargo check 2>&1 | tail -5
+    verify_command: cd contrib/rust_sindexer && cargo check 2>&1 | tail -5
 
   # ============================================
   # P2-T3: Test incremental skip for unchanged files
@@ -147,7 +147,7 @@ tasks:
       6. Verify the manifest file exists after both runs
 
       Keep the test self-contained. Use tempfile::TempDir.
-    verify_command: cd contrib/RClaude-Context && cargo test reindex_skips 2>&1 | tail -10
+    verify_command: cd contrib/rust_sindexer && cargo test reindex_skips 2>&1 | tail -10
 
   # ============================================
   # P2-T4: Test force reindex ignores manifest
@@ -172,7 +172,7 @@ tasks:
       6. Verify chunks_created > 0 on the forced run
 
       Keep the test self-contained. Use tempfile::TempDir.
-    verify_command: cd contrib/RClaude-Context && cargo test force_reindex 2>&1 | tail -10
+    verify_command: cd contrib/rust_sindexer && cargo test force_reindex 2>&1 | tail -10
 
   # ============================================
   # PHASE GATE
@@ -196,4 +196,4 @@ tasks:
 
       If all pass, print "PHASE 2 COMPLETE — hybrid search + incremental indexing live"
     verify_command: |
-      cd contrib/RClaude-Context && cargo test 2>&1 | tail -3 && grep -q "fuse_hybrid_hits" src/mcp/tools.rs && grep -q "manifest_store" src/mcp/indexer.rs && echo "PHASE 2 GATE PASSED"
+      cd contrib/rust_sindexer && cargo test 2>&1 | tail -3 && grep -q "fuse_hybrid_hits" src/mcp/tools.rs && grep -q "manifest_store" src/mcp/indexer.rs && echo "PHASE 2 GATE PASSED"

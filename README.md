@@ -1,17 +1,15 @@
-# RClaude-Context
+# rust_sindexer (Rust Semantic Indexer)
 
 High-performance Rust MCP server for semantic code context retrieval. Indexes codebases using tree-sitter for AST-aware chunking, generates embeddings, and stores them in Milvus for fast similarity search.
 
 ## Why Rust?
 
-The JavaScript reference implementation processes files sequentially. RClaude-Context uses Rayon for parallel file walking, parsing, and chunk extraction, achieving significant speedups on multi-core systems:
+The JavaScript reference implementation processes files sequentially. rust_sindexer uses Rayon for parallel file walking, parsing, and chunk extraction, achieving significant speedups on multi-core systems:
 
-| Operation | JavaScript | Rust |
-|-----------|------------|------|
-| File discovery | Sequential glob | Parallel with `ignore` crate |
-| AST parsing | One file at a time | Parallel across all cores |
-| Chunk extraction | Sequential | Parallel per-file |
-| Embedding batching | Fixed batch size | Adaptive concurrent batches |
+- **File discovery:** Parallel with `ignore` crate (vs sequential glob in JS)
+- **AST parsing:** Parallel across all cores (vs one file at a time)
+- **Chunk extraction:** Parallel per-file (vs sequential)
+- **Embedding batching:** Adaptive concurrent batches (vs fixed batch size)
 
 For a 10,000-file codebase on an 8-core machine, expect roughly 4-6x faster indexing compared to the sequential approach.
 
@@ -31,7 +29,7 @@ Each language has defined "splittable" node types (functions, classes, methods, 
 
 ### Milvus
 
-RClaude-Context requires a running Milvus instance for vector storage:
+rust_sindexer requires a running Milvus instance for vector storage:
 
 ```bash
 # Using Docker
@@ -60,32 +58,30 @@ uvx sentence-transformers serve --model all-MiniLM-L6-v2 --port 8080
 ### From Source
 
 ```bash
-git clone https://github.com/your-org/rclaude-context
-cd rclaude-context
+git clone https://github.com/RESMP-DEV/rust_sindexer
+cd rust_sindexer
 cargo build --release
 
-# Binary will be at target/release/rclaude-context
+# Binary will be at target/release/rust-sindexer
 ```
 
 ### Using Cargo
 
 ```bash
-cargo install rclaude-context
+cargo install rust-sindexer
 ```
 
 ## Configuration
 
 Environment variables:
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `MILVUS_HOST` | Milvus server hostname | `localhost` |
-| `MILVUS_PORT` | Milvus gRPC port | `19530` |
-| `EMBEDDING_URL` | Embedding server endpoint | `http://localhost:8080/embed` |
-| `EMBEDDING_DIM` | Embedding vector dimension | `384` |
-| `INDEX_PARALLELISM` | Number of indexing threads (0 = auto) | `0` |
-| `MAX_FILE_SIZE` | Maximum file size to process (bytes) | `1048576` |
-| `LOG_LEVEL` | Logging verbosity (trace/debug/info/warn/error) | `info` |
+- `MILVUS_HOST` — Milvus server hostname (default: `localhost`)
+- `MILVUS_PORT` — Milvus gRPC port (default: `19530`)
+- `EMBEDDING_URL` — Embedding server endpoint (default: `http://localhost:8080/embed`)
+- `EMBEDDING_DIM` — Embedding vector dimension (default: `384`)
+- `INDEX_PARALLELISM` — Number of indexing threads, 0 = auto (default: `0`)
+- `MAX_FILE_SIZE` — Maximum file size to process in bytes (default: `1048576`)
+- `LOG_LEVEL` — Logging verbosity: trace/debug/info/warn/error (default: `info`)
 
 ## Usage with Claude Code
 
@@ -95,7 +91,7 @@ Add to your Claude Code MCP configuration (`~/.claude/claude_desktop_config.json
 {
   "mcpServers": {
     "code-context": {
-      "command": "rclaude-context",
+      "command": "rust-sindexer",
       "args": [],
       "env": {
         "MILVUS_HOST": "localhost",
@@ -111,9 +107,9 @@ Add to your Claude Code MCP configuration (`~/.claude/claude_desktop_config.json
 Once configured, the MCP server exposes:
 
 - `index_codebase` - Index a directory, creating embeddings for all code chunks
-- `search_code` - Semantic search across indexed code
-- `get_index_status` - Check indexing progress
-- `list_collections` - List indexed codebases
+- `search_code` - Hybrid semantic + lexical search across indexed code
+- `get_indexing_status` - Check indexing progress
+- `clear_index` - Remove indexed data
 
 ## Architecture
 
@@ -124,7 +120,7 @@ Once configured, the MCP server exposes:
                      └────────┬────────┘
                               │ stdio
                      ┌────────▼────────┐
-                     │  RClaude-Context│
+                     │  rust_sindexer  │
                      │   (MCP Server)  │
                      └────────┬────────┘
               ┌───────────────┼───────────────┐
@@ -140,10 +136,6 @@ Once configured, the MCP server exposes:
                                      │  (Vector Store) │
                                      └─────────────────┘
 ```
-
-## Performance Benchmarks
-
-*TODO: Add benchmarks comparing indexing speed and query latency against the JavaScript implementation.*
 
 ## License
 
