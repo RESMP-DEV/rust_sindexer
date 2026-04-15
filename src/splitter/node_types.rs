@@ -117,6 +117,44 @@ pub static SPLITTABLE_NODES: LazyLock<HashMap<&'static str, &'static [&'static s
             &["function_definition", "struct_specifier", "enum_specifier"][..],
         );
 
+        // Ruby
+        m.insert(
+            "ruby",
+            &["method_definition", "class_definition", "module_definition"][..],
+        );
+
+        // PHP
+        m.insert(
+            "php",
+            &[
+                "function_definition",
+                "class_declaration",
+                "method_declaration",
+            ][..],
+        );
+
+        // Swift
+        m.insert(
+            "swift",
+            &[
+                "function_declaration",
+                "class_declaration",
+                "struct_declaration",
+            ][..],
+        );
+
+        // Scala
+        m.insert(
+            "scala",
+            &["function_definition", "class_definition", "object_definition"][..],
+        );
+
+        // C#
+        m.insert(
+            "csharp",
+            &["method_declaration", "class_declaration", "struct_declaration"][..],
+        );
+
         m
     });
 
@@ -204,6 +242,11 @@ mod tests {
     fn test_is_splittable() {
         assert!(is_splittable("python", "function_definition"));
         assert!(is_splittable("rust", "impl_item"));
+        assert!(is_splittable("ruby", "method_definition"));
+        assert!(is_splittable("php", "class_declaration"));
+        assert!(is_splittable("swift", "struct_declaration"));
+        assert!(is_splittable("scala", "object_definition"));
+        assert!(is_splittable("csharp", "struct_declaration"));
         assert!(!is_splittable("python", "expression_statement"));
         assert!(!is_splittable("unknown_lang", "function_definition"));
     }
@@ -224,5 +267,10 @@ mod tests {
         assert!(langs.contains(&"java"));
         assert!(langs.contains(&"cpp"));
         assert!(langs.contains(&"c"));
+        assert!(langs.contains(&"ruby"));
+        assert!(langs.contains(&"php"));
+        assert!(langs.contains(&"swift"));
+        assert!(langs.contains(&"scala"));
+        assert!(langs.contains(&"csharp"));
     }
 }

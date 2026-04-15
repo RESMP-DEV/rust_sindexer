@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
+use reqwest::header::{AUTHORIZATION, HeaderMap};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
@@ -14,14 +15,17 @@ pub struct EmbeddingConfig {
     pub model: String,
     /// Maximum number of texts per batch request.
     pub batch_size: usize,
+    /// Optional API key for providers that require bearer auth.
+    pub api_key: Option<String>,
 }
 
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
             url: "http://localhost:8100/v1/embeddings".to_string(),
-            model: "jina-v3".to_string(),
+            model: "all-minilm".to_string(),
             batch_size: 100,
+            api_key: None,
         }
     }
 }
@@ -29,13 +33,18 @@ impl Default for EmbeddingConfig {
 impl EmbeddingConfig {
     /// Creates an EmbeddingConfig from the application Config.
     pub fn from_config(config: &Config) -> Self {
+        let base_url = config.embedding_url.trim_end_matches('/');
+        let url = if base_url.ends_with("/v1") {
+            format!("{base_url}/embeddings")
+        } else {
+            format!("{base_url}/v1/embeddings")
+        };
+
         Self {
-            url: format!(
-                "{}/v1/embeddings",
-                config.embedding_url.trim_end_matches('/')
-            ),
+            url,
             model: config.embedding_model.clone(),
             batch_size: config.batch_size,
+            api_key: config.embedding_api_key.clone(),
         }
     }
 }
@@ -68,7 +77,18 @@ pub struct EmbeddingClient {
 impl EmbeddingClient {
     /// Creates a new embedding client with the given configuration.
     pub fn new(config: EmbeddingConfig) -> Self {
+        let mut headers = HeaderMap::new();
+        if let Some(ref key) = config.api_key {
+            headers.insert(
+                AUTHORIZATION,
+                format!("Bearer {}", key)
+                    .parse()
+                    .expect("valid header value"),
+            );
+        }
+
         let client = Client::builder()
+            .default_headers(headers)
             .pool_max_idle_per_host(32)
             .build()
             .expect("failed to build HTTP client");
@@ -157,7 +177,26 @@ mod tests {
     fn test_default_config() {
         let config = EmbeddingConfig::default();
         assert_eq!(config.url, "http://localhost:8100/v1/embeddings");
-        assert_eq!(config.model, "jina-v3");
+        assert_eq!(config.model, "all-minilm");
         assert_eq!(config.batch_size, 100);
+        assert_eq!(config.api_key, None);
+    }
+
+    #[test]
+    fn test_from_config_includes_api_key() {
+        let app_config = Config {
+            embedding_url: "https://api.openai.com/v1".to_string(),
+            embedding_model: "text-embedding-3-small".to_string(),
+            embedding_api_key: Some("secret".to_string()),
+            batch_size: 32,
+            ..Config::default()
+        };
+
+        let config = EmbeddingConfig::from_config(&app_config);
+
+        assert_eq!(config.url, "https://api.openai.com/v1/embeddings");
+        assert_eq!(config.model, "text-embedding-3-small");
+        assert_eq!(config.batch_size, 32);
+        assert_eq!(config.api_key.as_deref(), Some("secret"));
     }
 }

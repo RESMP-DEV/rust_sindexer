@@ -38,19 +38,27 @@ pub fn extract_chunks(
 ) -> Vec<CodeChunk> {
     let mut chunks = Vec::new();
     let root = tree.root_node();
-
-    extract_chunks_recursive(
-        root,
+    let mut ctx = ExtractionContext {
         source,
         node_types,
         file_path,
         relative_path,
         language,
-        &mut chunks,
-        false,
-    );
+        chunks: &mut chunks,
+    };
+
+    extract_chunks_recursive(root, &mut ctx, false);
 
     chunks
+}
+
+struct ExtractionContext<'a> {
+    source: &'a str,
+    node_types: &'a [&'a str],
+    file_path: &'a Path,
+    relative_path: &'a str,
+    language: &'a str,
+    chunks: &'a mut Vec<CodeChunk>,
 }
 
 /// Recursively walk the AST and extract chunks for matching node types.
@@ -59,52 +67,31 @@ pub fn extract_chunks(
 /// as separate top-level chunks when they're already part of a parent chunk.
 /// For example, methods inside a class are extracted as part of the class,
 /// not as separate chunks (unless the class is too large and needs splitting).
-fn extract_chunks_recursive(
-    node: Node,
-    source: &str,
-    node_types: &[&str],
-    file_path: &Path,
-    relative_path: &str,
-    language: &str,
-    chunks: &mut Vec<CodeChunk>,
-    inside_splittable: bool,
-) {
+fn extract_chunks_recursive(node: Node, ctx: &mut ExtractionContext<'_>, inside_splittable: bool) {
     let node_type = node.kind();
-    let is_splittable = node_types.contains(&node_type);
+    let is_splittable = ctx.node_types.contains(&node_type);
 
     if is_splittable && !inside_splittable {
         // Extract this node as a chunk
-        if let Some(chunk) = node_to_chunk(node, source, file_path, relative_path, language) {
-            chunks.push(chunk);
+        if let Some(chunk) = node_to_chunk(
+            node,
+            ctx.source,
+            ctx.file_path,
+            ctx.relative_path,
+            ctx.language,
+        ) {
+            ctx.chunks.push(chunk);
         }
 
         // Continue walking children but mark that we're inside a splittable node
         // This allows us to still find nested splittable types if needed
         for child in node.children(&mut node.walk()) {
-            extract_chunks_recursive(
-                child,
-                source,
-                node_types,
-                file_path,
-                relative_path,
-                language,
-                chunks,
-                true, // Now inside a splittable node
-            );
+            extract_chunks_recursive(child, ctx, true);
         }
     } else {
         // Not a splittable node, or already inside one - continue walking
         for child in node.children(&mut node.walk()) {
-            extract_chunks_recursive(
-                child,
-                source,
-                node_types,
-                file_path,
-                relative_path,
-                language,
-                chunks,
-                inside_splittable,
-            );
+            extract_chunks_recursive(child, ctx, inside_splittable);
         }
     }
 }
@@ -168,7 +155,6 @@ fn generate_chunk_id(relative_path: &str, start_line: u32, content: &str) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn parse_rust(source: &str) -> Tree {
         let mut parser = tree_sitter::Parser::new();

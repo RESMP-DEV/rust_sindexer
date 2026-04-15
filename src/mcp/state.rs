@@ -75,13 +75,9 @@ impl ContextState {
     ///
     /// Initializes all clients and resources needed for MCP operations.
     pub fn new(config: Config) -> Self {
-        let embedding_config = crate::embedding::EmbeddingConfig {
-            url: config.embedding_url.clone(),
-            model: config.embedding_model.clone(),
-            batch_size: config.batch_size,
-        };
+        let embedding_config = crate::embedding::EmbeddingConfig::from_config(&config);
         let embedding_client = EmbeddingClient::new(embedding_config);
-        let milvus_client = MilvusClient::new(&config.milvus_url);
+        let milvus_client = MilvusClient::new(&config.milvus_url, config.milvus_token.clone());
         let splitter_config = crate::splitter::Config {
             max_chunk_bytes: config.chunk_size,
             overlap_lines: config.chunk_overlap / 80, // approximate lines from char overlap

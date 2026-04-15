@@ -3,6 +3,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use ignore::WalkBuilder;
+use rclaude_context::walker::CodeWalker;
 use tempfile::TempDir;
 
 /// Create a test file with given content
@@ -262,6 +263,22 @@ fn test_respects_gitignore_wildcards() {
     assert!(!paths.iter().any(|p| p.ends_with("app.min.js")));
     assert!(!paths.iter().any(|p| p.ends_with("style.min.css")));
     assert!(!paths.iter().any(|p| p.to_string_lossy().contains("build")));
+}
+
+#[tokio::test]
+async fn test_respects_contextignore_file_patterns() {
+    let temp = TempDir::new().unwrap();
+
+    create_file(&temp, ".contextignore", "generated/\n");
+    let src_main = create_file(&temp, "src/main.rs", "fn main() {}");
+    create_file(&temp, "generated/output.rs", "pub fn generated() {}");
+
+    let walker = CodeWalker::new();
+    let paths = walker.walk(temp.path()).await.unwrap();
+
+    assert_eq!(paths.len(), 1);
+    assert!(paths.contains(&src_main));
+    assert!(!paths.iter().any(|p| p.ends_with("generated/output.rs")));
 }
 
 #[test]

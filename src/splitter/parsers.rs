@@ -1,6 +1,5 @@
-use once_cell::sync::OnceCell;
-use std::collections::HashMap;
-use std::sync::Mutex;
+// Skipped grammars: Kotlin (`tree-sitter-kotlin` 0.3 uses the older tree-sitter
+// `Language` API and is incompatible with this crate's tree-sitter 0.26 parser setup).
 use tree_sitter::Parser;
 
 /// Manages tree-sitter parsers for multiple programming languages.
@@ -34,12 +33,10 @@ impl LanguageParser {
     }
 }
 
-/// Global parser cache using OnceCell for thread-safe lazy initialization.
-static PARSER_CACHE: OnceCell<Mutex<HashMap<&'static str, Parser>>> = OnceCell::new();
-
 /// Returns a parser for the specified language.
 ///
-/// Supported languages: python, javascript, typescript, tsx, rust, go, java, cpp, c
+/// Supported languages: python, javascript, typescript, tsx, rust, go, java, cpp,
+/// c, ruby, php, swift, scala, csharp
 ///
 /// Returns None if the language is not supported.
 pub fn get_parser(language: &str) -> Option<Parser> {
@@ -53,12 +50,16 @@ pub fn get_parser(language: &str) -> Option<Parser> {
         "java" => tree_sitter_java::LANGUAGE,
         "cpp" | "c++" | "cxx" | "cc" => tree_sitter_cpp::LANGUAGE,
         "c" => tree_sitter_c::LANGUAGE,
+        "ruby" | "rb" => tree_sitter_ruby::LANGUAGE,
+        "php" => tree_sitter_php::LANGUAGE_PHP,
+        "swift" => tree_sitter_swift::LANGUAGE,
+        "scala" => tree_sitter_scala::LANGUAGE,
+        "csharp" | "c#" | "cs" => tree_sitter_c_sharp::LANGUAGE,
         _ => return None,
     };
 
-    let mut parser = Parser::new();
-    parser.set_language(&lang.into()).ok()?;
-    Some(parser)
+    let parser = LanguageParser::new(lang.into());
+    Some(parser.parser)
 }
 
 /// Maps a file extension to a language name.
@@ -76,6 +77,11 @@ pub fn extension_to_language(ext: &str) -> Option<&'static str> {
         "java" => Some("java"),
         "cpp" | "cxx" | "cc" | "c++" | "hpp" | "hxx" | "h++" => Some("cpp"),
         "c" | "h" => Some("c"),
+        "rb" => Some("ruby"),
+        "php" => Some("php"),
+        "swift" => Some("swift"),
+        "scala" => Some("scala"),
+        "cs" => Some("csharp"),
         _ => None,
     }
 }
@@ -140,6 +146,36 @@ mod tests {
     }
 
     #[test]
+    fn test_get_parser_ruby() {
+        let parser = get_parser("ruby");
+        assert!(parser.is_some());
+    }
+
+    #[test]
+    fn test_get_parser_php() {
+        let parser = get_parser("php");
+        assert!(parser.is_some());
+    }
+
+    #[test]
+    fn test_get_parser_swift() {
+        let parser = get_parser("swift");
+        assert!(parser.is_some());
+    }
+
+    #[test]
+    fn test_get_parser_scala() {
+        let parser = get_parser("scala");
+        assert!(parser.is_some());
+    }
+
+    #[test]
+    fn test_get_parser_csharp() {
+        let parser = get_parser("csharp");
+        assert!(parser.is_some());
+    }
+
+    #[test]
     fn test_get_parser_unknown() {
         let parser = get_parser("unknown");
         assert!(parser.is_none());
@@ -156,6 +192,11 @@ mod tests {
         assert_eq!(extension_to_language("java"), Some("java"));
         assert_eq!(extension_to_language("cpp"), Some("cpp"));
         assert_eq!(extension_to_language("c"), Some("c"));
+        assert_eq!(extension_to_language("rb"), Some("ruby"));
+        assert_eq!(extension_to_language("php"), Some("php"));
+        assert_eq!(extension_to_language("swift"), Some("swift"));
+        assert_eq!(extension_to_language("scala"), Some("scala"));
+        assert_eq!(extension_to_language("cs"), Some("csharp"));
         assert_eq!(extension_to_language("unknown"), None);
     }
 
@@ -163,6 +204,11 @@ mod tests {
     fn test_get_parser_for_extension() {
         assert!(get_parser_for_extension("py").is_some());
         assert!(get_parser_for_extension("js").is_some());
+        assert!(get_parser_for_extension("rb").is_some());
+        assert!(get_parser_for_extension("php").is_some());
+        assert!(get_parser_for_extension("swift").is_some());
+        assert!(get_parser_for_extension("scala").is_some());
+        assert!(get_parser_for_extension("cs").is_some());
         assert!(get_parser_for_extension("unknown").is_none());
     }
 

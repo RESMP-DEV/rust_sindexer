@@ -61,13 +61,25 @@ impl CodeWalker {
 
         let files = std::sync::Arc::new(Mutex::new(Vec::new()));
         let extensions = self.extensions.clone();
+        let mut builder = WalkBuilder::new(path);
 
-        let walker = WalkBuilder::new(path)
+        builder
             .hidden(true)
             .git_ignore(true)
             .git_global(true)
-            .git_exclude(true)
-            .build_parallel();
+            .git_exclude(true);
+        builder.add_custom_ignore_filename(".contextignore");
+
+        if let Some(home) = std::env::var_os("HOME") {
+            let global_ignore = std::path::PathBuf::from(home)
+                .join(".context")
+                .join(".contextignore");
+            if global_ignore.exists() {
+                builder.add_ignore(global_ignore);
+            }
+        }
+
+        let walker = builder.build_parallel();
 
         let files_ref = files.clone();
         walker.run(|| {
@@ -75,7 +87,7 @@ impl CodeWalker {
             let extensions = extensions.clone();
             Box::new(move |entry| {
                 if let Ok(entry) = entry {
-                    if entry.file_type().map_or(false, |ft| ft.is_file()) {
+                    if entry.file_type().is_some_and(|ft| ft.is_file()) {
                         if let Some(ext) = entry.path().extension() {
                             if extensions
                                 .iter()
@@ -90,10 +102,10 @@ impl CodeWalker {
             })
         });
 
-        let result = std::sync::Arc::try_unwrap(files)
-            .map_err(|_| anyhow::anyhow!("Failed to unwrap Arc"))?
-            .into_inner()
-            .map_err(|e| anyhow::anyhow!("Failed to get mutex: {}", e))?;
+        let result = files
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to get mutex: {}", e))?
+            .clone();
 
         Ok(result)
     }

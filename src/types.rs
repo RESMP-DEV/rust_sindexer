@@ -32,10 +32,11 @@ pub struct EmbeddingVector {
 }
 
 /// Current state of the indexing process.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum IndexState {
     /// No indexing in progress.
+    #[default]
     Idle,
     /// Currently indexing files.
     Indexing,
@@ -46,7 +47,7 @@ pub enum IndexState {
 }
 
 /// Status of the code index.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct IndexStatus {
     /// Total number of files to process.
     pub total_files: usize,
@@ -56,21 +57,4 @@ pub struct IndexStatus {
     pub total_chunks: usize,
     /// Current indexing state.
     pub status: IndexState,
-}
-
-impl Default for IndexState {
-    fn default() -> Self {
-        Self::Idle
-    }
-}
-
-impl Default for IndexStatus {
-    fn default() -> Self {
-        Self {
-            total_files: 0,
-            processed_files: 0,
-            total_chunks: 0,
-            status: IndexState::default(),
-        }
-    }
 }

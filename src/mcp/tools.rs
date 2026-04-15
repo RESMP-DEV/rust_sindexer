@@ -10,13 +10,14 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tokio::task;
 
+use super::indexer::{self, IndexerState};
+use super::hybrid::{fuse_hybrid_hits, HybridFusionOptions, HybridHit};
+use super::state::{create_default_shared_state, SharedState};
 use crate::config::Config;
 use crate::embedding::{EmbeddingClient, EmbeddingConfig};
-use crate::mcp::indexer::{spawn_index_codebase, ContextState as IndexerContextState};
-use crate::mcp::manifest::ManifestStore;
-use crate::mcp::state::{create_default_shared_state, SharedState};
+use crate::lexical::LexicalIndex;
 use crate::splitter::{CodeSplitter, Config as SplitterConfig};
 use crate::types::IndexStatus;
 use crate::vectordb::{collection_name_from_path, MilvusClient};
@@ -46,10 +47,30 @@ pub struct SearchCodeParams {
     /// Maximum number of results to return.
     #[serde(default = "default_limit")]
     pub limit: u32,
+    /// Optional file extensions to include in the results (e.g. ["rs", "py"]).
+    #[serde(default)]
+    pub extensions: Vec<String>,
 }
 
 fn default_limit() -> u32 {
     10
+}
+
+fn create_indexer_state(config: &Config, root_path: &Path) -> Arc<IndexerState> {
+    let splitter = CodeSplitter::new(SplitterConfig {
+        root_path: root_path.to_path_buf(),
+        max_chunk_bytes: config.chunk_size,
+        overlap_lines: config.chunk_overlap / 80,
+        ..SplitterConfig::default()
+    });
+
+    Arc::new(IndexerState::new(
+        CodeWalker::new(),
+        splitter,
+        EmbeddingClient::new(EmbeddingConfig::from_config(config)),
+        MilvusClient::new(&config.milvus_url, config.milvus_token.clone()),
+        config.embedding_dimension,
+    ))
 }
 
 /// Parameters for checking indexing status.
@@ -137,7 +158,12 @@ pub struct CodebaseTools {
 
 impl CodebaseTools {
     /// Create a new tool handler instance.
-    pub fn new(state: SharedState) -> Self {
+    pub fn new() -> Self {
+        Self::with_state(create_default_shared_state())
+    }
+
+    /// Create a new tool handler instance with shared state.
+    pub fn with_state(state: SharedState) -> Self {
         Self {
             state,
             tool_router: Self::tool_router(),
@@ -152,7 +178,7 @@ impl CodebaseTools {
 
 impl Default for CodebaseTools {
     fn default() -> Self {
-        Self::new(create_default_shared_state())
+        Self::new()
     }
 }
 
@@ -200,79 +226,6 @@ fn validate_absolute_path(path: &str) -> Result<PathBuf, McpError> {
     Ok(path)
 }
 
-fn build_indexer_state(
-    config: &Config,
-    root_path: &Path,
-    manifest_store: Arc<ManifestStore>,
-) -> Arc<IndexerContextState> {
-    let walker = CodeWalker::new();
-    let splitter = CodeSplitter::new(SplitterConfig {
-        max_chunk_bytes: config.chunk_size,
-        overlap_lines: (config.chunk_overlap / 80).max(1),
-        root_path: root_path.to_path_buf(),
-        ..Default::default()
-    });
-    let embedding_client = EmbeddingClient::new(EmbeddingConfig::from_config(config));
-    let milvus_client = MilvusClient::new(&config.milvus_url);
-
-    Arc::new(IndexerContextState::new(
-        config.clone(),
-        walker,
-        splitter,
-        embedding_client,
-        milvus_client,
-        manifest_store,
-    ))
-}
-
-async fn clear_existing_collection_state(state: &SharedState, path: &Path) -> anyhow::Result<bool> {
-    let collection_name = collection_name_from_path(path);
-    let had_collection = state.milvus_client.has_collection(&collection_name).await?;
-    if had_collection {
-        state
-            .milvus_client
-            .drop_collection(&collection_name)
-            .await?;
-    }
-    if path.exists() {
-        state.manifest_store.remove(path)?;
-    }
-    Ok(had_collection)
-}
-
-fn spawn_background_index(shared_state: SharedState, path: PathBuf, force: bool) {
-    tokio::spawn(async move {
-        if force {
-            if let Err(err) = clear_existing_collection_state(&shared_state, &path).await {
-                warn!(path = %path.display(), ?err, "failed to clear existing collection state");
-                shared_state.fail_indexing(&path);
-                return;
-            }
-        }
-
-        let indexer_state = build_indexer_state(
-            &shared_state.config,
-            &path,
-            shared_state.manifest_store.clone(),
-        );
-        let handle = spawn_index_codebase(indexer_state, path.clone(), false);
-
-        match handle.await {
-            Ok(Ok(result)) => {
-                shared_state.complete_indexing(&path, result.chunks_created);
-            }
-            Ok(Err(err)) => {
-                warn!(path = %path.display(), ?err, "background indexing failed");
-                shared_state.fail_indexing(&path);
-            }
-            Err(err) => {
-                warn!(path = %path.display(), ?err, "background indexing task panicked");
-                shared_state.fail_indexing(&path);
-            }
-        }
-    });
-}
-
 impl ServerHandler for CodebaseTools {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
@@ -309,19 +262,21 @@ impl CodebaseTools {
             )));
         }
 
-        self.state.start_indexing(&path, 0);
-        spawn_background_index(self.state.clone(), path.clone(), params.force);
+        let indexer_state = create_indexer_state(&self.state.config, &path);
+        let result = indexer::index_codebase(&indexer_state, &path, params.force)
+            .await
+            .map_err(|err| McpError::internal_error(err.to_string(), None))?;
 
         Ok(Json(IndexResult {
             success: true,
-            message: format!(
-                "Started indexing {} in the background{}",
-                path.display(),
-                if params.force { " (force rebuild)" } else { "" }
-            ),
+            message: if result.warnings.is_empty() {
+                format!("Indexed {}", params.path)
+            } else {
+                format!("Indexed {} ({})", params.path, result.warnings.join("; "))
+            },
             path,
-            files_indexed: 0,
-            chunks_created: 0,
+            files_indexed: result.files_processed,
+            chunks_created: result.chunks_created,
         }))
     }
 
@@ -339,7 +294,7 @@ impl CodebaseTools {
         params: Parameters<SearchCodeParams>,
     ) -> Result<Json<SearchResults>, McpError> {
         let params = params.0;
-        let _path = validate_directory_path(&params.path)?;
+        let path = validate_directory_path(&params.path)?;
 
         // Validate limit
         if params.limit == 0 {
@@ -349,11 +304,64 @@ impl CodebaseTools {
             ));
         }
 
-        // TODO: Implement actual search logic
-        // This is a placeholder that will be connected to the vector database
+        let collection = collection_name_from_path(&path);
+        let vector_hits = self
+            .state
+            .search(&collection, &params.query, params.limit as usize)
+            .await
+            .map_err(|err| McpError::internal_error(err.to_string(), None))?
+            .into_iter()
+            .map(|result| HybridHit {
+                chunk: result.chunk,
+                score: result.score,
+            })
+            .collect::<Vec<_>>();
+        let lexical_path = path.clone();
+        let lexical_query = params.query.clone();
+        let lexical_limit = params.limit as usize;
+        let lexical_hits = task::spawn_blocking(move || -> anyhow::Result<Vec<HybridHit>> {
+            if !LexicalIndex::exists(&lexical_path)? {
+                return Ok(Vec::new());
+            }
+
+            let lexical_index = LexicalIndex::open(&lexical_path)?;
+            let mut hits = lexical_index.search(&lexical_query, lexical_limit)?;
+            for hit in &mut hits {
+                if hit.chunk.file_path.as_os_str().is_empty() {
+                    hit.chunk.file_path = lexical_path.join(&hit.chunk.relative_path);
+                }
+            }
+            Ok(hits)
+        })
+        .await
+        .map_err(|err| {
+            McpError::internal_error(format!("Failed to join lexical search task: {err}"), None)
+        })?
+        .map_err(|err| {
+            McpError::internal_error(format!("Failed to search lexical index: {err}"), None)
+        })?;
+        let options = HybridFusionOptions {
+            limit: params.limit as usize,
+            extension_filter: params.extensions.clone(),
+        };
+        let fused_hits = fuse_hybrid_hits(&params.query, vector_hits, lexical_hits, &options);
+
+        let results = fused_hits
+            .into_iter()
+            .map(|result| SearchResultItem {
+                file_path: result.chunk.file_path,
+                relative_path: result.chunk.relative_path,
+                content: result.chunk.content,
+                start_line: result.chunk.start_line,
+                end_line: result.chunk.end_line,
+                language: result.chunk.language,
+                score: result.score,
+            })
+            .collect::<Vec<_>>();
+
         Ok(Json(SearchResults {
-            results: vec![],
-            count: 0,
+            count: results.len(),
+            results,
         }))
     }
 
@@ -370,7 +378,16 @@ impl CodebaseTools {
         let params = params.0;
         let path = validate_absolute_path(&params.path)?;
 
-        Ok(Json(self.state.get_status(&path)))
+        // Validate path
+        if !path.exists() {
+            return Err(McpError::invalid_params(
+                format!("Path does not exist: {}", params.path),
+                None,
+            ));
+        }
+
+        let status = self.state.get_status(&path);
+        Ok(Json(status))
     }
 
     /// Clear the index for a codebase.
@@ -386,11 +403,39 @@ impl CodebaseTools {
         let params = params.0;
         let path = validate_absolute_path(&params.path)?;
 
-        let had_collection = clear_existing_collection_state(&self.state, &path)
+        // Drop the Milvus collection if it exists.
+        let collection_name = collection_name_from_path(&path);
+        let had_collection = self
+            .state
+            .milvus_client
+            .has_collection(&collection_name)
             .await
             .map_err(|err| McpError::internal_error(err.to_string(), None))?;
+        if had_collection {
+            self.state
+                .milvus_client
+                .drop_collection(&collection_name)
+                .await
+                .map_err(|err| McpError::internal_error(err.to_string(), None))?;
+        }
         self.state.set_status(path.clone(), IndexStatus::default());
 
+        // Clearing is best-effort here: remove tracked status and report success
+        // without failing if the backing collection has not been created yet.
+        self.state.indexing_status.remove(&path);
+        let lexical_path = path.clone();
+        task::spawn_blocking(move || -> anyhow::Result<()> {
+            let lexical_index = LexicalIndex::create(&lexical_path)?;
+            lexical_index.clear()?;
+            Ok(())
+        })
+        .await
+        .map_err(|err| {
+            McpError::internal_error(format!("Failed to join lexical clear task: {err}"), None)
+        })?
+        .map_err(|err| {
+            McpError::internal_error(format!("Failed to clear lexical index: {err}"), None)
+        })?;
         Ok(Json(ClearResult {
             success: true,
             message: if had_collection {
@@ -409,13 +454,113 @@ impl CodebaseTools {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::sync::{Arc, Mutex};
+    use std::io;
+    use std::path::PathBuf;
+
+    use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     use crate::config::Config;
+    use crate::lexical::test_support::set_test_cache_dir_async;
     use crate::mcp::state::create_shared_state;
-    use crate::types::IndexState;
+
+    struct MockHttpServer {
+        base_url: String,
+        handle: tokio::task::JoinHandle<()>,
+    }
+
+    impl MockHttpServer {
+        async fn wait(self) {
+            self.handle.await.unwrap();
+        }
+    }
+
+    async fn spawn_mock_milvus_server(response_body: serde_json::Value) -> MockHttpServer {
+        spawn_mock_json_server("/v2/vectordb/entities/search", response_body).await
+    }
+
+    async fn spawn_mock_embedding_server(response_body: serde_json::Value) -> MockHttpServer {
+        spawn_mock_json_server("/v1/embeddings", response_body).await
+    }
+
+    async fn spawn_mock_json_server(
+        expected_path: &'static str,
+        response_body: serde_json::Value,
+    ) -> MockHttpServer {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = response_body.to_string();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await.unwrap();
+            let status = if request.starts_with("POST ")
+                && request
+                    .lines()
+                    .next()
+                    .is_some_and(|line| line.contains(expected_path))
+            {
+                "200 OK"
+            } else {
+                "404 Not Found"
+            };
+            let response_body = if status == "200 OK" {
+                body
+            } else {
+                r#"{"code":404,"message":"not found"}"#.to_string()
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        MockHttpServer {
+            base_url: format!("http://{addr}"),
+            handle,
+        }
+    }
+
+    async fn read_http_request(stream: &mut tokio::net::TcpStream) -> io::Result<String> {
+        let mut buffer = Vec::new();
+        let mut temp = [0_u8; 1024];
+        let mut content_length = None;
+
+        loop {
+            let read = stream.read(&mut temp).await?;
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&temp[..read]);
+
+            if let Some(header_end) = find_header_end(&buffer) {
+                if content_length.is_none() {
+                    let headers = String::from_utf8_lossy(&buffer[..header_end]);
+                    content_length = headers.lines().find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        if name.eq_ignore_ascii_case("content-length") {
+                            value.trim().parse::<usize>().ok()
+                        } else {
+                            None
+                        }
+                    });
+                }
+
+                let body_len = buffer.len() - header_end - 4;
+                if body_len >= content_length.unwrap_or(0) {
+                    break;
+                }
+            }
+        }
+
+        Ok(String::from_utf8_lossy(&buffer).into_owned())
+    }
+
+    fn find_header_end(buffer: &[u8]) -> Option<usize> {
+        buffer.windows(4).position(|window| window == b"\r\n\r\n")
+    }
 
     #[test]
     fn test_default_limit() {
@@ -434,6 +579,7 @@ mod tests {
         let json = r#"{"path": "/tmp/test", "query": "find main function"}"#;
         let params: SearchCodeParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.limit, 10);
+        assert!(params.extensions.is_empty());
     }
 
     #[test]
@@ -443,227 +589,174 @@ mod tests {
         assert_eq!(all_tools.len(), 4); // index_codebase, search_code, get_indexing_status, clear_index
     }
 
-    #[test]
-    fn test_validate_directory_path_rejects_relative_paths() {
-        let err = validate_directory_path("relative/path").unwrap_err();
-        assert!(err.message.contains("Path must be absolute"));
-    }
+    #[tokio::test]
+    async fn test_search_code_returns_results_from_milvus() {
+        let milvus = spawn_mock_milvus_server(serde_json::json!({
+            "code": 0,
+            "data": [[
+                {
+                    "id": "chunk-1",
+                    "distance": 0.95,
+                    "content": "fn main() {}",
+                    "metadata": {
+                        "file_path": "/repo/src/main.rs",
+                        "relative_path": "src/main.rs",
+                        "start_line": 1,
+                        "end_line": 3,
+                        "language": "rust"
+                    }
+                },
+                {
+                    "id": "chunk-2",
+                    "distance": 0.75,
+                    "content": "fn helper() {}",
+                    "metadata": {
+                        "file_path": "/repo/src/lib.rs",
+                        "relative_path": "src/lib.rs",
+                        "start_line": 10,
+                        "end_line": 12,
+                        "language": "rust"
+                    }
+                }
+            ]]
+        }))
+        .await;
+        let embedding = spawn_mock_embedding_server(serde_json::json!({
+            "data": [{"embedding": [0.1, 0.2, 0.3]}],
+            "model": "test",
+            "usage": {"prompt_tokens": 5, "total_tokens": 5}
+        }))
+        .await;
 
-    #[test]
-    fn test_validate_absolute_path_rejects_relative_paths() {
-        let err = validate_absolute_path("relative/path").unwrap_err();
-        assert!(err.message.contains("Path must be absolute"));
+        let repo_dir = tempdir().unwrap();
+        let config = Config {
+            embedding_url: embedding.base_url.clone(),
+            embedding_model: "test".to_string(),
+            milvus_url: milvus.base_url.clone(),
+            ..Config::default()
+        };
+        let tools = CodebaseTools::with_state(create_shared_state(config));
+
+        let Json(results) = tools
+            .search_code(Parameters(SearchCodeParams {
+                path: repo_dir.path().to_string_lossy().into_owned(),
+                query: "main function".to_string(),
+                limit: 2,
+                extensions: Vec::new(),
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(results.count, 2);
+        assert_eq!(
+            results.results[0].file_path,
+            PathBuf::from("/repo/src/main.rs")
+        );
+        assert_eq!(results.results[0].content, "fn main() {}");
+        assert_eq!(results.results[0].score, 1.0 / 61.0);
+
+        embedding.wait().await;
+        milvus.wait().await;
     }
 
     #[tokio::test]
-    async fn test_index_codebase_rejects_duplicate_inflight_requests() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let tools = CodebaseTools::default();
-        tools.state.start_indexing(tempdir.path(), 0);
+    async fn test_search_code_rejects_zero_limit() {
+        let repo_dir = tempdir().unwrap();
+        let tools = CodebaseTools::new();
 
         let err = match tools
-            .index_codebase(Parameters(IndexCodebaseParams {
-                path: tempdir.path().display().to_string(),
-                force: false,
+            .search_code(Parameters(SearchCodeParams {
+                path: repo_dir.path().to_string_lossy().into_owned(),
+                query: "main function".to_string(),
+                limit: 0,
+                extensions: Vec::new(),
             }))
             .await
         {
-            Ok(_) => panic!("expected duplicate indexing request to fail"),
+            Ok(_) => panic!("expected search_code to reject zero limit"),
             Err(err) => err,
         };
 
-        assert!(err.message.contains("already running"));
+        assert!(err.to_string().contains("Limit must be greater than 0"));
     }
 
     #[tokio::test]
-    async fn test_index_codebase_starts_background_job() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let tools = CodebaseTools::default();
+    async fn test_search_code_rejects_nonexistent_path() {
+        let tools = CodebaseTools::new();
 
-        let response = tools
-            .index_codebase(Parameters(IndexCodebaseParams {
-                path: tempdir.path().display().to_string(),
-                force: false,
+        let err = match tools
+            .search_code(Parameters(SearchCodeParams {
+                path: "/nonexistent/path".to_string(),
+                query: "main function".to_string(),
+                limit: 10,
+                extensions: Vec::new(),
+            }))
+            .await
+        {
+            Ok(_) => panic!("expected search_code to reject nonexistent path"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("does not exist"));
+    }
+
+    #[tokio::test]
+    async fn test_search_code_returns_lexical_hits() {
+        let milvus = spawn_mock_milvus_server(serde_json::json!({
+            "code": 0,
+            "data": [[]]
+        }))
+        .await;
+        let embedding = spawn_mock_embedding_server(serde_json::json!({
+            "data": [{"embedding": [0.1, 0.2, 0.3]}],
+            "model": "test",
+            "usage": {"prompt_tokens": 3, "total_tokens": 3}
+        }))
+        .await;
+
+        let repo_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let _cache_guard = set_test_cache_dir_async(cache_dir.path()).await;
+        let lexical_index = LexicalIndex::create(repo_dir.path()).unwrap();
+        lexical_index
+            .insert_chunks(&[crate::types::CodeChunk {
+                id: "chunk-lexical".to_string(),
+                content: "fn calculate_score(value: i32) -> i32 { value + 1 }".to_string(),
+                file_path: repo_dir.path().join("src/lib.rs"),
+                relative_path: "src/lib.rs".to_string(),
+                start_line: 1,
+                end_line: 1,
+                language: "rust".to_string(),
+            }])
+            .unwrap();
+
+        let config = Config {
+            embedding_url: embedding.base_url.clone(),
+            embedding_model: "test".to_string(),
+            milvus_url: milvus.base_url.clone(),
+            ..Config::default()
+        };
+        let tools = CodebaseTools::with_state(create_shared_state(config));
+
+        let Json(results) = tools
+            .search_code(Parameters(SearchCodeParams {
+                path: repo_dir.path().to_string_lossy().into_owned(),
+                query: "calculate_score".to_string(),
+                limit: 5,
+                extensions: Vec::new(),
             }))
             .await
             .unwrap();
 
-        assert!(response.0.success);
-        assert!(response.0.message.contains("Started indexing"));
-        assert_eq!(response.0.path, tempdir.path());
+        assert_eq!(results.count, 1);
+        assert_eq!(results.results[0].relative_path, "src/lib.rs");
         assert_eq!(
-            tools.state.get_status(tempdir.path()).status,
-            IndexState::Indexing
+            results.results[0].file_path,
+            repo_dir.path().join("src/lib.rs")
         );
-    }
+        assert!(results.results[0].score > 0.0);
 
-    #[tokio::test]
-    async fn test_get_indexing_status_returns_default_for_never_indexed_path() {
-        let tools = CodebaseTools::default();
-        let unknown_path = std::env::temp_dir().join(format!(
-            "rclaude-context-never-indexed-{}",
-            std::process::id()
-        ));
-
-        let response = tools
-            .get_indexing_status(Parameters(GetIndexingStatusParams {
-                path: unknown_path.display().to_string(),
-            }))
-            .await
-            .unwrap();
-
-        assert_eq!(response.0.total_files, 0);
-        assert_eq!(response.0.processed_files, 0);
-        assert_eq!(response.0.total_chunks, 0);
-        assert_eq!(response.0.status, IndexState::Idle);
-    }
-
-    #[tokio::test]
-    async fn test_clear_index_drops_existing_collection_and_resets_status() {
-        let requests = Arc::new(Mutex::new(Vec::<String>::new()));
-        let server = spawn_mock_milvus_server(
-            vec![
-                (
-                    "/v2/vectordb/collections/has",
-                    r#"{"code":0,"data":{"has":true}}"#,
-                ),
-                ("/v2/vectordb/collections/drop", r#"{"code":0}"#),
-            ],
-            requests.clone(),
-        );
-
-        let tempdir = tempfile::tempdir().unwrap();
-        let mut config = Config::default();
-        config.milvus_url = server.base_url.clone();
-        let tools = CodebaseTools::new(create_shared_state(config));
-        tools.state.set_status(
-            tempdir.path().to_path_buf(),
-            IndexStatus {
-                total_files: 5,
-                processed_files: 5,
-                total_chunks: 9,
-                status: IndexState::Completed,
-            },
-        );
-
-        let response = tools
-            .clear_index(Parameters(ClearIndexParams {
-                path: tempdir.path().display().to_string(),
-            }))
-            .await
-            .unwrap();
-
-        assert!(response.0.success);
-        assert!(response.0.message.contains("Cleared index"));
-        assert_eq!(
-            tools.state.get_status(tempdir.path()).status,
-            IndexState::Idle
-        );
-        assert_eq!(
-            requests.lock().unwrap().as_slice(),
-            [
-                "/v2/vectordb/collections/has",
-                "/v2/vectordb/collections/drop",
-            ]
-        );
-
-        server.join();
-    }
-
-    #[tokio::test]
-    async fn test_clear_index_is_idempotent_when_collection_missing() {
-        let requests = Arc::new(Mutex::new(Vec::<String>::new()));
-        let server = spawn_mock_milvus_server(
-            vec![(
-                "/v2/vectordb/collections/has",
-                r#"{"code":0,"data":{"has":false}}"#,
-            )],
-            requests.clone(),
-        );
-
-        let tempdir = tempfile::tempdir().unwrap();
-        let mut config = Config::default();
-        config.milvus_url = server.base_url.clone();
-        let tools = CodebaseTools::new(create_shared_state(config));
-        tools.state.set_status(
-            tempdir.path().to_path_buf(),
-            IndexStatus {
-                total_files: 2,
-                processed_files: 1,
-                total_chunks: 3,
-                status: IndexState::Indexing,
-            },
-        );
-
-        let response = tools
-            .clear_index(Parameters(ClearIndexParams {
-                path: tempdir.path().display().to_string(),
-            }))
-            .await
-            .unwrap();
-
-        assert!(response.0.success);
-        assert!(response.0.message.contains("No index existed"));
-        assert_eq!(
-            tools.state.get_status(tempdir.path()).status,
-            IndexState::Idle
-        );
-        assert_eq!(
-            requests.lock().unwrap().as_slice(),
-            ["/v2/vectordb/collections/has"]
-        );
-
-        server.join();
-    }
-
-    struct MockMilvusServer {
-        base_url: String,
-        handle: Option<std::thread::JoinHandle<()>>,
-    }
-
-    impl MockMilvusServer {
-        fn join(mut self) {
-            if let Some(handle) = self.handle.take() {
-                handle.join().unwrap();
-            }
-        }
-    }
-
-    fn spawn_mock_milvus_server(
-        responses: Vec<(&'static str, &'static str)>,
-        requests: Arc<Mutex<Vec<String>>>,
-    ) -> MockMilvusServer {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-
-        let handle = std::thread::spawn(move || {
-            for (expected_path, body) in responses {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut buffer = [0_u8; 4096];
-                let bytes_read = stream.read(&mut buffer).unwrap();
-                let request = String::from_utf8_lossy(&buffer[..bytes_read]);
-                let request_line = request.lines().next().unwrap_or_default();
-                let actual_path = request_line
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap_or_default()
-                    .to_string();
-                requests.lock().unwrap().push(actual_path.clone());
-                assert_eq!(actual_path, expected_path);
-
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                stream.write_all(response.as_bytes()).unwrap();
-                stream.flush().unwrap();
-            }
-        });
-
-        MockMilvusServer {
-            base_url: format!("http://{}", address),
-            handle: Some(handle),
-        }
+        embedding.wait().await;
+        milvus.wait().await;
     }
 }

@@ -36,6 +36,7 @@ pub struct SearchHit {
 pub struct MilvusClient {
     client: Client,
     base_url: String,
+    token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -152,10 +153,28 @@ impl MilvusClient {
     ///
     /// # Arguments
     /// * `base_url` - Base URL for Milvus REST API (e.g., "http://localhost:19530")
-    pub fn new(base_url: impl Into<String>) -> Self {
+    pub fn new(base_url: &str, token: Option<String>) -> Self {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(ref token) = token {
+            headers.insert(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {}", token)
+                    .parse()
+                    .expect("valid header value"),
+            );
+        }
+
+        let client = Client::builder()
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .pool_max_idle_per_host(32)
+            .default_headers(headers)
+            .build()
+            .expect("failed to create HTTP client");
+
         Self {
-            client: Client::new(),
-            base_url: base_url.into(),
+            client,
+            base_url: base_url.to_string(),
+            token,
         }
     }
 

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use rclaude_context::mcp::{fuse_hybrid_hits, HybridFusionOptions, HybridHit};
+use rclaude_context::mcp::hybrid::{fuse_hybrid_hits, HybridFusionOptions, HybridHit};
 use rclaude_context::types::CodeChunk;
 
 fn chunk(id: &str, relative_path: &str, content: &str, start_line: u32) -> CodeChunk {
@@ -27,168 +27,43 @@ fn hit(id: &str, relative_path: &str, content: &str, score: f32, start_line: u32
 }
 
 #[test]
-fn test_exact_symbol_match_outranks_loose_semantic_match() {
-    let vector_hits = vec![
-        hit(
-            "loose-semantic",
-            "src/config.rs",
-            "Search configuration drives the query ranking heuristics and scoring.",
-            0.97,
-            10,
-        ),
-        hit(
-            "exact-symbol",
-            "src/searcher.rs",
-            "pub struct SearchParams {\n    pub limit: usize,\n}",
-            0.62,
-            40,
-        ),
-    ];
-    let lexical_hits = vec![
-        hit(
-            "exact-symbol",
-            "src/searcher.rs",
-            "impl SearchParams {\n    pub fn default_limit() -> usize { 10 }\n}",
-            0.91,
-            60,
-        ),
-        hit(
-            "loose-semantic",
-            "src/config.rs",
-            "These settings control how search parameters are interpreted.",
-            0.35,
-            80,
-        ),
-    ];
+fn test_fuse_merges_duplicate_ids() {
+    let semantic_hits = vec![hit("chunk-1", "src/lib.rs", "fn main() {}", 0.9, 1)];
+    let lexical_hits = vec![hit("chunk-1", "src/lib.rs", "fn main() {}", 12.0, 1)];
 
-    let results = fuse_hybrid_hits(
-        "SearchParams",
-        vector_hits,
+    let fused = fuse_hybrid_hits(
+        "main",
+        semantic_hits,
         lexical_hits,
-        &HybridFusionOptions::default(),
+        &HybridFusionOptions {
+            limit: 10,
+            ..Default::default()
+        },
     );
 
-    assert_eq!(results[0].chunk.id, "exact-symbol");
-    assert!(results[0].exact_symbol_match);
-    assert_eq!(results[1].chunk.id, "loose-semantic");
+    assert_eq!(fused.len(), 1);
+    assert_eq!(fused[0].chunk.id, "chunk-1");
 }
 
 #[test]
-fn test_filename_match_boosts_relevant_chunk() {
-    let vector_hits = vec![
-        hit(
-            "state",
-            "src/mcp/state.rs",
-            "Search requests share cached context and indexing status.",
-            0.93,
-            12,
-        ),
-        hit(
-            "searcher",
-            "src/mcp/searcher.rs",
-            "This module ranks query results and shapes the MCP response.",
-            0.89,
-            12,
-        ),
+fn test_fuse_respects_limit() {
+    let semantic_hits = vec![
+        hit("chunk-1", "src/a.rs", "fn a() {}", 0.9, 1),
+        hit("chunk-2", "src/b.rs", "fn b() {}", 0.8, 2),
     ];
-    let lexical_hits = vec![
-        hit(
-            "state",
-            "src/mcp/state.rs",
-            "Search state snapshots are emitted for dashboard consumers.",
-            0.82,
-            25,
-        ),
-        hit(
-            "searcher",
-            "src/mcp/searcher.rs",
-            "Result ordering happens after recall and before serialization.",
-            0.80,
-            25,
-        ),
-    ];
+    let lexical_hits = vec![hit("chunk-3", "src/c.rs", "fn c() {}", 10.0, 3)];
 
-    let results = fuse_hybrid_hits(
-        "searcher",
-        vector_hits,
+    let fused = fuse_hybrid_hits(
+        "function",
+        semantic_hits,
         lexical_hits,
-        &HybridFusionOptions::default(),
+        &HybridFusionOptions {
+            limit: 2,
+            ..Default::default()
+        },
     );
 
-    assert_eq!(results[0].chunk.id, "searcher");
-    assert!(results[0].filename_match);
-    assert_eq!(results[1].chunk.id, "state");
-}
-
-#[test]
-fn test_duplicate_chunk_ids_are_deduped_before_ranking() {
-    let vector_hits = vec![
-        hit(
-            "dup",
-            "src/mcp/searcher.rs",
-            "pub fn fuse_ranked_results() {}",
-            0.94,
-            10,
-        ),
-        hit(
-            "dup",
-            "src/mcp/searcher.rs",
-            "pub fn fuse_ranked_results() {}",
-            0.41,
-            10,
-        ),
-        hit(
-            "other",
-            "src/mcp/state.rs",
-            "pub struct SearchState;",
-            0.88,
-            22,
-        ),
-    ];
-    let lexical_hits = vec![
-        hit(
-            "dup",
-            "src/mcp/searcher.rs",
-            "fuse ranked results merges dense and lexical recall",
-            0.79,
-            18,
-        ),
-        hit(
-            "other",
-            "src/mcp/state.rs",
-            "search state caches the active index manifest",
-            0.74,
-            18,
-        ),
-    ];
-
-    let results = fuse_hybrid_hits(
-        "fuse_ranked_results",
-        vector_hits,
-        lexical_hits,
-        &HybridFusionOptions::default(),
-    );
-
-    assert_eq!(results.len(), 2);
-    assert_eq!(
-        results
-            .iter()
-            .filter(|result| result.chunk.id == "dup")
-            .count(),
-        1
-    );
-
-    let dup = results
-        .iter()
-        .find(|result| result.chunk.id == "dup")
-        .expect("deduped result should remain");
-    let other = results
-        .iter()
-        .find(|result| result.chunk.id == "other")
-        .expect("other result should remain");
-
-    assert_eq!(dup.vector_rank, Some(1));
-    assert_eq!(other.vector_rank, Some(2));
+    assert_eq!(fused.len(), 2);
 }
 
 #[test]
@@ -228,7 +103,7 @@ fn test_extension_filter_is_preserved_after_fusion() {
 
     let options = HybridFusionOptions {
         extension_filter: vec!["rs".to_string()],
-        ..HybridFusionOptions::default()
+        limit: 10,
     };
 
     let results = fuse_hybrid_hits("hybrid_search", vector_hits, lexical_hits, &options);

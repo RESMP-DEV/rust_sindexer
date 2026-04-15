@@ -1,273 +1,193 @@
-use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
-
 use crate::types::CodeChunk;
+use std::collections::HashMap;
 
-/// Dense or lexical hit participating in hybrid fusion.
+/// Result item for combined lexical / semantic retrieval flows.
 #[derive(Clone, Debug)]
 pub struct HybridHit {
-    /// The recalled code chunk.
     pub chunk: CodeChunk,
-    /// Modality-local score. Higher is better.
     pub score: f32,
 }
 
-/// Deterministic knobs for hybrid rank fusion.
-#[derive(Clone, Debug)]
+/// Configuration for hybrid retrieval fusion.
+#[derive(Clone, Debug, Default)]
 pub struct HybridFusionOptions {
-    /// Maximum number of fused results to return.
     pub limit: usize,
-    /// Allowed file extensions without the leading dot. Empty means no filter.
     pub extension_filter: Vec<String>,
-    /// Reciprocal-rank-fusion constant.
-    pub rrf_k: usize,
-    /// Additional score for an exact identifier match in the chunk content.
-    pub exact_symbol_boost: f32,
-    /// Additional score when the filename or path matches the query.
-    pub filename_match_boost: f32,
 }
 
-impl Default for HybridFusionOptions {
-    fn default() -> Self {
-        Self {
-            limit: 10,
-            extension_filter: Vec::new(),
-            rrf_k: 60,
-            exact_symbol_boost: 0.35,
-            filename_match_boost: 0.08,
-        }
-    }
-}
-
-/// Final fused result for a code chunk.
-#[derive(Clone, Debug)]
-pub struct HybridSearchResult {
-    /// The code chunk returned to the caller.
-    pub chunk: CodeChunk,
-    /// Final fused score after RRF and lexical boosts.
-    pub score: f32,
-    /// 1-based rank in the dense/vector result list after dedupe.
-    pub vector_rank: Option<usize>,
-    /// 1-based rank in the lexical result list after dedupe.
-    pub lexical_rank: Option<usize>,
-    /// Whether the query matched an identifier exactly in the chunk content.
-    pub exact_symbol_match: bool,
-    /// Whether the query matched the filename or relative path.
-    pub filename_match: bool,
-}
-
-#[derive(Clone, Debug)]
-struct Accumulator {
-    chunk: CodeChunk,
-    score: f32,
-    vector_rank: Option<usize>,
-    lexical_rank: Option<usize>,
-    exact_symbol_match: bool,
-    filename_match: bool,
-}
-
-/// Fuse vector recall with lexical recall using deterministic reciprocal rank fusion.
-///
-/// The helper is intentionally pure so tests can validate the public `search_code`
-/// behavior without depending on Milvus, embeddings, or network availability.
+/// Fuse semantic and lexical hits using reciprocal rank fusion.
 pub fn fuse_hybrid_hits(
-    query: &str,
-    vector_hits: Vec<HybridHit>,
+    _query: &str,
+    semantic_hits: Vec<HybridHit>,
     lexical_hits: Vec<HybridHit>,
     options: &HybridFusionOptions,
-) -> Vec<HybridSearchResult> {
-    let extension_filter = normalize_extensions(&options.extension_filter);
-    let vector_hits = dedupe_and_sort_hits(vector_hits, &extension_filter);
-    let lexical_hits = dedupe_and_sort_hits(lexical_hits, &extension_filter);
-
-    let mut fused: BTreeMap<String, Accumulator> = BTreeMap::new();
-
-    for (index, hit) in vector_hits.iter().enumerate() {
-        let entry = fused
-            .entry(hit.chunk.id.clone())
-            .or_insert_with(|| Accumulator {
-                chunk: hit.chunk.clone(),
-                score: 0.0,
-                vector_rank: None,
-                lexical_rank: None,
-                exact_symbol_match: false,
-                filename_match: false,
-            });
-        entry.vector_rank.get_or_insert(index + 1);
-        entry.score += reciprocal_rank_score(options.rrf_k, index);
-    }
-
-    for (index, hit) in lexical_hits.iter().enumerate() {
-        let entry = fused
-            .entry(hit.chunk.id.clone())
-            .or_insert_with(|| Accumulator {
-                chunk: hit.chunk.clone(),
-                score: 0.0,
-                vector_rank: None,
-                lexical_rank: None,
-                exact_symbol_match: false,
-                filename_match: false,
-            });
-        entry.lexical_rank.get_or_insert(index + 1);
-        entry.score += reciprocal_rank_score(options.rrf_k, index);
-    }
-
-    for entry in fused.values_mut() {
-        entry.exact_symbol_match = contains_exact_symbol(&entry.chunk.content, query);
-        entry.filename_match = matches_filename(&entry.chunk, query);
-        if entry.exact_symbol_match {
-            entry.score += options.exact_symbol_boost;
-        }
-        if entry.filename_match {
-            entry.score += options.filename_match_boost;
-        }
-    }
-
-    let mut ranked: Vec<HybridSearchResult> = fused
-        .into_values()
-        .map(|entry| HybridSearchResult {
-            chunk: entry.chunk,
-            score: entry.score,
-            vector_rank: entry.vector_rank,
-            lexical_rank: entry.lexical_rank,
-            exact_symbol_match: entry.exact_symbol_match,
-            filename_match: entry.filename_match,
-        })
-        .collect();
-
-    ranked.sort_by(|left, right| {
-        right
-            .score
-            .total_cmp(&left.score)
-            .then_with(|| right.exact_symbol_match.cmp(&left.exact_symbol_match))
-            .then_with(|| right.filename_match.cmp(&left.filename_match))
-            .then_with(|| {
-                left.vector_rank
-                    .unwrap_or(usize::MAX)
-                    .cmp(&right.vector_rank.unwrap_or(usize::MAX))
-            })
-            .then_with(|| {
-                left.lexical_rank
-                    .unwrap_or(usize::MAX)
-                    .cmp(&right.lexical_rank.unwrap_or(usize::MAX))
-            })
-            .then_with(|| left.chunk.relative_path.cmp(&right.chunk.relative_path))
-            .then_with(|| left.chunk.start_line.cmp(&right.chunk.start_line))
-            .then_with(|| left.chunk.id.cmp(&right.chunk.id))
-    });
-
-    ranked.truncate(options.limit);
-    ranked
-}
-
-fn dedupe_and_sort_hits(
-    hits: Vec<HybridHit>,
-    extension_filter: &HashSet<String>,
 ) -> Vec<HybridHit> {
-    let mut deduped: BTreeMap<String, HybridHit> = BTreeMap::new();
-
-    for hit in hits {
-        if !extension_allowed(&hit.chunk, extension_filter) {
-            continue;
-        }
-
-        match deduped.get_mut(&hit.chunk.id) {
-            Some(existing) => {
-                if hit.score > existing.score
-                    || (hit.score == existing.score
-                        && chunk_sort_key(&hit.chunk) < chunk_sort_key(&existing.chunk))
-                {
-                    *existing = hit;
-                }
-            }
-            None => {
-                deduped.insert(hit.chunk.id.clone(), hit);
-            }
-        }
+    if options.limit == 0 {
+        return Vec::new();
     }
 
-    let mut hits: Vec<HybridHit> = deduped.into_values().collect();
-    hits.sort_by(|left, right| {
-        right
-            .score
-            .total_cmp(&left.score)
-            .then_with(|| chunk_sort_key(&left.chunk).cmp(&chunk_sort_key(&right.chunk)))
-    });
-    hits
+    let mut fused = HashMap::new();
+    merge_ranked_hits(
+        &mut fused,
+        filter_hits(semantic_hits, &options.extension_filter),
+    );
+    merge_ranked_hits(
+        &mut fused,
+        filter_hits(lexical_hits, &options.extension_filter),
+    );
+
+    let mut fused_hits: Vec<HybridHit> = fused.into_values().collect();
+    fused_hits.sort_by(|left, right| right.score.total_cmp(&left.score));
+    fused_hits.truncate(options.limit);
+    fused_hits
 }
 
-fn chunk_sort_key(chunk: &CodeChunk) -> (&str, u32, &str) {
-    (&chunk.relative_path, chunk.start_line, &chunk.id)
-}
+fn filter_hits(hits: Vec<HybridHit>, extension_filter: &[String]) -> Vec<HybridHit> {
+    if extension_filter.is_empty() {
+        return hits;
+    }
 
-fn reciprocal_rank_score(k: usize, index: usize) -> f32 {
-    1.0 / (k as f32 + index as f32 + 1.0)
-}
-
-fn normalize_extensions(extensions: &[String]) -> HashSet<String> {
-    extensions
+    let normalized = extension_filter
         .iter()
         .map(|ext| ext.trim_start_matches('.').to_ascii_lowercase())
-        .filter(|ext| !ext.is_empty())
+        .collect::<Vec<_>>();
+
+    hits.into_iter()
+        .filter(|hit| {
+            hit.chunk
+                .relative_path
+                .rsplit('.')
+                .next()
+                .filter(|ext| *ext != hit.chunk.relative_path)
+                .map(|ext| {
+                    normalized
+                        .iter()
+                        .any(|candidate| candidate == &ext.to_ascii_lowercase())
+                })
+                .unwrap_or(false)
+        })
         .collect()
 }
 
-fn extension_allowed(chunk: &CodeChunk, extension_filter: &HashSet<String>) -> bool {
-    if extension_filter.is_empty() {
-        return true;
-    }
+fn merge_ranked_hits(fused: &mut HashMap<String, HybridHit>, hits: Vec<HybridHit>) {
+    for (rank, hit) in hits.into_iter().enumerate() {
+        let key = hit_key(&hit.chunk);
+        let rrf_score = 1.0 / (60.0 + rank as f32 + 1.0);
 
-    chunk_extension(chunk)
-        .map(|ext| extension_filter.contains(&ext))
-        .unwrap_or(false)
+        fused
+            .entry(key)
+            .and_modify(|existing| {
+                existing.score += rrf_score;
+                if existing.chunk.file_path.as_os_str().is_empty()
+                    && !hit.chunk.file_path.as_os_str().is_empty()
+                {
+                    existing.chunk.file_path = hit.chunk.file_path.clone();
+                }
+            })
+            .or_insert(HybridHit {
+                chunk: hit.chunk,
+                score: rrf_score,
+            });
+    }
 }
 
-fn chunk_extension(chunk: &CodeChunk) -> Option<String> {
-    Path::new(&chunk.relative_path)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .or_else(|| chunk.file_path.extension().and_then(|ext| ext.to_str()))
-        .map(|ext| ext.to_ascii_lowercase())
-}
-
-fn contains_exact_symbol(content: &str, query: &str) -> bool {
-    let needle = query.trim().to_ascii_lowercase();
-    if needle.is_empty() {
-        return false;
+fn hit_key(chunk: &CodeChunk) -> String {
+    if !chunk.id.is_empty() {
+        return chunk.id.clone();
     }
 
-    let haystack = content.to_ascii_lowercase();
-    haystack.match_indices(&needle).any(|(index, _)| {
-        let before = haystack[..index].chars().next_back();
-        let after = haystack[index + needle.len()..].chars().next();
-        !before.map(is_identifier_char).unwrap_or(false)
-            && !after.map(is_identifier_char).unwrap_or(false)
-    })
+    format!(
+        "{}:{}:{}:{}",
+        chunk.relative_path, chunk.start_line, chunk.end_line, chunk.language
+    )
 }
 
-fn matches_filename(chunk: &CodeChunk, query: &str) -> bool {
-    let query = query.trim().to_ascii_lowercase();
-    if query.is_empty() {
-        return false;
+#[cfg(test)]
+mod tests {
+    use super::{fuse_hybrid_hits, HybridFusionOptions, HybridHit};
+    use crate::types::CodeChunk;
+    use std::path::PathBuf;
+
+    fn hit(
+        id: &str,
+        relative_path: &str,
+        file_path: &str,
+        start_line: u32,
+        score: f32,
+    ) -> HybridHit {
+        HybridHit {
+            chunk: CodeChunk {
+                id: id.to_string(),
+                content: format!("fn {id}() {{}}"),
+                file_path: PathBuf::from(file_path),
+                relative_path: relative_path.to_string(),
+                start_line,
+                end_line: start_line,
+                language: "rust".to_string(),
+            },
+            score,
+        }
     }
 
-    let relative_path = chunk.relative_path.to_ascii_lowercase();
-    let file_stem = Path::new(&chunk.relative_path)
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    #[test]
+    fn test_fuse_hybrid_hits_merges_duplicate_hits() {
+        let semantic_hits = vec![hit("chunk-1", "src/lib.rs", "/repo/src/lib.rs", 10, 0.9)];
+        let lexical_hits = vec![hit("chunk-1", "src/lib.rs", "", 10, 12.0)];
 
-    if file_stem == query || file_stem.contains(&query) || relative_path.contains(&query) {
-        return true;
+        let fused = fuse_hybrid_hits(
+            "lib",
+            semantic_hits,
+            lexical_hits,
+            &HybridFusionOptions {
+                limit: 10,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(fused.len(), 1);
+        assert_eq!(fused[0].chunk.id, "chunk-1");
+        assert_eq!(fused[0].chunk.file_path, PathBuf::from("/repo/src/lib.rs"));
     }
 
-    query
-        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
-        .filter(|token| token.len() >= 2)
-        .any(|token| file_stem.contains(token) || relative_path.contains(token))
-}
+    #[test]
+    fn test_fuse_hybrid_hits_respects_limit() {
+        let semantic_hits = vec![
+            hit("chunk-1", "src/a.rs", "/repo/src/a.rs", 1, 0.9),
+            hit("chunk-2", "src/b.rs", "/repo/src/b.rs", 2, 0.8),
+        ];
+        let lexical_hits = vec![hit("chunk-3", "src/c.rs", "", 3, 10.0)];
 
-fn is_identifier_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_'
+        let fused = fuse_hybrid_hits(
+            "lib",
+            semantic_hits,
+            lexical_hits,
+            &HybridFusionOptions {
+                limit: 2,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(fused.len(), 2);
+    }
+
+    #[test]
+    fn test_fuse_hybrid_hits_filters_extensions() {
+        let semantic_hits = vec![
+            hit("chunk-1", "src/a.rs", "/repo/src/a.rs", 1, 0.9),
+            hit("chunk-2", "src/b.py", "/repo/src/b.py", 2, 0.8),
+        ];
+
+        let fused = fuse_hybrid_hits(
+            "lib",
+            semantic_hits,
+            Vec::new(),
+            &HybridFusionOptions {
+                limit: 10,
+                extension_filter: vec!["rs".to_string()],
+            },
+        );
+
+        assert_eq!(fused.len(), 1);
+        assert_eq!(fused[0].chunk.relative_path, "src/a.rs");
+    }
 }

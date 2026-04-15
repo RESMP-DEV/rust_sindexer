@@ -37,8 +37,12 @@ pub struct Config {
     pub embedding_url: String,
     /// Model name for embeddings.
     pub embedding_model: String,
+    /// Optional API key for embedding providers that require bearer auth.
+    pub embedding_api_key: Option<String>,
     /// URL for Milvus vector database.
     pub milvus_url: String,
+    /// Optional bearer token for authenticated Milvus-compatible endpoints.
+    pub milvus_token: Option<String>,
     /// Size of text chunks in characters.
     pub chunk_size: usize,
     /// Overlap between adjacent chunks in characters.
@@ -62,7 +66,9 @@ impl Default for Config {
         Self {
             embedding_url: "http://localhost:8100".to_string(),
             embedding_model: "all-minilm".to_string(),
+            embedding_api_key: None,
             milvus_url: "http://localhost:19530".to_string(),
+            milvus_token: None,
             chunk_size: 512,
             chunk_overlap: 64,
             batch_size: 32,
@@ -83,7 +89,9 @@ impl Config {
         Self {
             embedding_url: env::var("EMBEDDING_URL").unwrap_or(defaults.embedding_url),
             embedding_model: env::var("EMBEDDING_MODEL").unwrap_or(defaults.embedding_model),
+            embedding_api_key: env::var("EMBEDDING_API_KEY").ok(),
             milvus_url: env::var("MILVUS_URL").unwrap_or(defaults.milvus_url),
+            milvus_token: env::var("MILVUS_TOKEN").ok(),
             chunk_size: env::var("CHUNK_SIZE")
                 .ok()
                 .and_then(|s| s.parse().ok())

@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
 
     // Create the tool handler and wrap in Router
     let config = Config::from_env();
-    let tools = CodebaseTools::new(create_shared_state(config));
+    let tools = CodebaseTools::with_state(create_shared_state(config));
     let router = Router::new(tools);
 
     // Serve MCP over stdio
