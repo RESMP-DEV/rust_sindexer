@@ -1,4 +1,4 @@
-# rust_sindexer (Rust Semantic Indexer)
+# (Rust Semantic Indexer) rust_sindexer
 
 A high-performance Rust MCP server for semantic code indexing and search. Drop-in replacement for [`@zilliz/claude-context-mcp`](https://www.npmjs.com/package/@zilliz/claude-context-mcp) — single native binary, no Node.js required.
 
