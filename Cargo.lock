@@ -1553,6 +1553,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dashmap",
+ "futures",
  "hex",
  "ignore",
  "once_cell",

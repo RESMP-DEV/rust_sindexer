@@ -23,6 +23,7 @@ use crate::lexical::LexicalIndex;
 use crate::splitter::CodeSplitter;
 use crate::types::{CodeChunk, IndexState, IndexStatus};
 use crate::vectordb::{collection_name_from_path, InsertRow, MilvusClient};
+use crate::vectordb::client::milvus_id_for_chunk_id;
 use crate::walker::CodeWalker;
 
 /// Batch size for embedding requests - balances throughput vs memory.
@@ -431,7 +432,7 @@ pub async fn index_codebase(
         .into_iter()
         .zip(all_embeddings.into_iter())
         .map(|(chunk, embedding)| InsertRow {
-            id: chunk.id,
+            id: milvus_id_for_chunk_id(&chunk.id),
             content: chunk.content.clone(),
             vector: embedding.vector,
             metadata: serde_json::json!({

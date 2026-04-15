@@ -1,11 +1,19 @@
 //! MCP tool definitions for codebase indexing and semantic search.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rmcp::{
-    handler::server::{tool::ToolRouter, wrapper::Parameters},
-    model::{ServerCapabilities, ServerInfo},
+    handler::server::{
+        tool::{ToolCallContext, ToolRouter},
+        wrapper::Parameters,
+    },
+    model::{
+        CallToolRequestParam, CallToolResult, ListToolsResult, PaginatedRequestParam,
+        ServerCapabilities, ServerInfo,
+    },
+    service::{RequestContext, RoleServer},
     tool, tool_router, ErrorData as McpError, Json, ServerHandler,
 };
 use schemars::JsonSchema;
@@ -232,6 +240,28 @@ impl ServerHandler for CodebaseTools {
             instructions: Some("Semantic code indexing and search MCP server".into()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
+        }
+    }
+
+    fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
+        std::future::ready(Ok(ListToolsResult {
+            tools: self.tool_router.list_all(),
+            ..Default::default()
+        }))
+    }
+
+    fn call_tool(
+        &self,
+        request: CallToolRequestParam,
+        context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
+        async move {
+            let tool_context = ToolCallContext::new(self, request, context);
+            self.tool_router.call(tool_context).await
         }
     }
 }

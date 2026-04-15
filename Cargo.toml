@@ -12,6 +12,7 @@ categories = ["development-tools", "text-processing"]
 rmcp = { version = "0.12", features = ["server", "transport-io", "macros"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
+futures = "0.3"
 rayon = "1.10"
 ignore = "0.4"
 tree-sitter = "0.26"

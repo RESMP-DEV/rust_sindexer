@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::types::CodeChunk;
 
@@ -86,7 +87,7 @@ struct InsertRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InsertRow {
     /// Unique identifier.
-    pub id: String,
+    pub id: i64,
     /// Text content.
     pub content: String,
     /// Embedding vector.
@@ -112,13 +113,20 @@ struct SearchRequest {
 #[derive(Deserialize)]
 struct SearchResponse {
     code: i32,
-    data: Option<Vec<Vec<SearchResultItem>>>,
+    data: Option<SearchResultsData>,
     message: Option<String>,
 }
 
 #[derive(Deserialize)]
+#[serde(untagged)]
+enum SearchResultsData {
+    Flat(Vec<SearchResultItem>),
+    Nested(Vec<Vec<SearchResultItem>>),
+}
+
+#[derive(Deserialize)]
 struct SearchResultItem {
-    id: String,
+    id: serde_json::Value,
     distance: f32,
     content: Option<String>,
     metadata: Option<serde_json::Value>,
@@ -261,7 +269,7 @@ impl MilvusClient {
         let data: Vec<InsertRow> = docs
             .into_iter()
             .map(|doc| InsertRow {
-                id: doc.id,
+                id: milvus_id_for_chunk_id(&doc.id),
                 content: doc.content,
                 vector: doc.vector,
                 metadata: doc.metadata,
@@ -346,11 +354,11 @@ impl MilvusClient {
 
         let hits = response
             .data
-            .and_then(|results| results.into_iter().next())
+            .map(SearchResultsData::into_hits)
             .unwrap_or_default()
             .into_iter()
             .map(|item| SearchHit {
-                id: item.id,
+                id: milvus_search_id_to_string(item.id),
                 score: item.distance,
                 content: item.content.unwrap_or_default(),
                 metadata: item.metadata.unwrap_or(serde_json::Value::Null),
@@ -466,7 +474,7 @@ impl MilvusClient {
             .into_iter()
             .zip(embeddings.iter())
             .map(|(chunk, embedding)| InsertRow {
-                id: chunk.id,
+                id: milvus_id_for_chunk_id(&chunk.id),
                 content: chunk.content,
                 vector: embedding.clone(),
                 metadata: serde_json::json!({
@@ -515,5 +523,55 @@ impl MilvusClient {
         }
 
         Ok(())
+    }
+}
+
+pub(crate) fn milvus_id_for_chunk_id(id: &str) -> i64 {
+    let digest = Sha256::digest(id.as_bytes());
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    (u64::from_be_bytes(bytes) & (i64::MAX as u64)) as i64
+}
+
+fn milvus_search_id_to_string(value: serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s,
+        serde_json::Value::Number(n) => n.to_string(),
+        other => other.to_string(),
+    }
+}
+
+impl SearchResultsData {
+    fn into_hits(self) -> Vec<SearchResultItem> {
+        match self {
+            SearchResultsData::Flat(items) => items,
+            SearchResultsData::Nested(groups) => groups.into_iter().next().unwrap_or_default(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SearchResponse, milvus_id_for_chunk_id};
+
+    #[test]
+    fn milvus_ids_are_stable_positive_i64s() {
+        let id = milvus_id_for_chunk_id("chunk-1");
+        assert!(id >= 0);
+        assert_eq!(id, milvus_id_for_chunk_id("chunk-1"));
+        assert_ne!(id, milvus_id_for_chunk_id("chunk-2"));
+    }
+
+    #[test]
+    fn search_response_accepts_flat_results() {
+        let response: SearchResponse = serde_json::from_value(serde_json::json!({
+            "code": 0,
+            "data": [
+                { "id": 123, "distance": 0.0, "content": "hello", "metadata": {} }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(response.data.unwrap().into_hits().len(), 1);
     }
 }
