@@ -1,49 +1,60 @@
 # rust_sindexer (Rust Semantic Indexer)
 
-High-performance Rust MCP server for semantic code indexing. Drop-in replacement for the JS-based Claude Context MCP — single native binary, no Node.js overhead.
+High-performance Rust MCP server for semantic code indexing. Single native binary, no Node.js overhead. Works out of the box with zero external services.
 
-Implements a walker → splitter → embedder → vector DB pipeline with BM25 lexical search and hybrid fusion.
+## Quick Start
+
+```bash
+cargo build --release
+./target/release/rust_sindexer
+```
+
+No configuration needed. By default, uses BM25 lexical search with a local vector store. Set `EMBEDDING_URL` and optionally `MILVUS_URL` to enable semantic search.
+
+MCP client configuration (Claude Desktop, etc.):
+```json
+{
+  "mcpServers": {
+    "sindexer": {
+      "command": "/path/to/rust_sindexer"
+    }
+  }
+}
+```
+
+## Operating Modes
+
+- **Lexical only (default)** — No env vars needed. BM25 keyword/symbol search with local vector store. Good for exact matches and code navigation.
+- **Semantic + lexical** — Set `EMBEDDING_URL` to an OpenAI-compatible endpoint. Hybrid RRF fusion of semantic similarity + BM25. Local vector store handles project-scale indexing (<50K chunks).
+- **Full scale** — Set both `EMBEDDING_URL` and `MILVUS_URL` for large-scale deployments with Milvus/Zilliz Cloud as the vector backend.
 
 ## Architecture
 
 ```
-Walker (files) → Splitter (chunks) → Embedder (vectors) → Vector DB (store)
+Walker (files) → Splitter (chunks) → Embedder (vectors) → Vector Store
                                           │
                                      Lexical (BM25)
                                           │
                                      Hybrid Fusion (RRF)
 ```
 
+When embeddings are disabled, the pipeline stops after splitting and only populates the lexical index.
+
 ## Components
 
-**Walker** (`src/walker/mod.rs`) — Parallel file discovery using the `ignore` crate with native .gitignore support. Filters by extension during traversal. Auto-detects CPU cores.
+**Walker** (`src/walker/mod.rs`) — Parallel file discovery using the `ignore` crate with native .gitignore support. Filters by extension and extensionless filenames (Dockerfile, Makefile, etc.) during traversal. Uses `config::SUPPORTED_EXTENSIONS` as the single source of truth for 60+ file types.
 
-**Splitter** (`src/splitter/`) — Tree-sitter AST parsing for semantic code chunking. Extracts functions, classes, structs, traits, impl blocks per language. Splits oversized chunks at line boundaries with configurable overlap.
-- `parsers.rs` — language parser initialization
-- `node_types.rs` — AST node type definitions per language
-- `extractor.rs` — recursive AST walker for chunk extraction
-- `refine.rs` — chunk size management and splitting
+**Splitter** (`src/splitter/`) — Tree-sitter AST parsing for semantic code chunking. Extracts functions, classes, structs, traits, impl blocks per language. Splits oversized chunks at line boundaries with configurable overlap. Falls back to markdown heading or line-based splitting for unsupported languages.
 
-Supported languages: Python, JavaScript, TypeScript, TSX, Rust, Go, Java, C++, C, Ruby, PHP, Swift, Scala, C#
+Supported AST languages: Python, JavaScript, TypeScript, TSX, Rust, Go, Java, C++, C, Ruby, PHP, Swift, Scala, C#
 
-**Embedder** (`src/embedding/mod.rs`) — HTTP client for any OpenAI-compatible embedding API. Batches 100 texts per request. Connection pool: 32 idle per host. Works with any provider that speaks the `/v1/embeddings` format.
+**Embedder** (`src/embedding/mod.rs`) — `Embedder` enum: `Http(EmbeddingClient)` for OpenAI-compatible APIs, or `Disabled` for lexical-only mode. Auto-detected from `EMBEDDING_URL` env var. Batches 100 texts per request.
 
-Tested providers:
-- Jina AI (`jina-code-embeddings-1.5b`) — free tier, good for code
-- OpenAI (`text-embedding-3-small`, `text-embedding-3-large`)
-- Local servers (ollama, vLLM, TEI, sentence-transformers)
-- Any OpenAI-compatible endpoint
+**Vector Store** (`src/vectordb/`) — `VectorStore` enum: `Local(LocalStore)` for brute-force in-memory cosine similarity with JSON disk persistence (~75MB for 50K chunks at 384-dim), or `Milvus(MilvusClient)` for remote Milvus. Auto-detected from `MILVUS_URL` env var.
 
-**Vector DB** (`src/vectordb/`) — RESTful client for Milvus vector database. COSINE similarity metric. Batches 500 documents per insert. Schema: id, content, vector, metadata (JSON).
+**Lexical Search** (`src/lexical/mod.rs`) — Tantivy-based BM25 index for keyword/symbol search.
 
-Tested backends:
-- Zilliz Cloud (managed Milvus, free tier available)
-- Self-hosted Milvus via Docker
-- Any Milvus-compatible REST API
-
-**Lexical Search** (`src/lexical/mod.rs`) — Tantivy-based BM25 index for keyword/symbol search. Stored in-memory per collection.
-
-**Hybrid Fusion** (`src/mcp/hybrid.rs`) — Reciprocal Rank Fusion (RRF) combining semantic and lexical results. Configurable weights, top-k, and fusion constant.
+**Hybrid Fusion** (`src/mcp/hybrid.rs`) — Reciprocal Rank Fusion (RRF) combining semantic and lexical results. Works correctly when either source is empty.
 
 **Incremental Indexing** (`src/mcp/manifest.rs`) — File-hash manifest stored at `.rust_sindexer/index-manifest.json`. Tracks SHA-256 per file to skip unchanged files on reindex. Pass `force: true` to bypass.
 
@@ -52,11 +63,13 @@ Tested backends:
 - `src/main.rs` — MCP server entry point, stdio transport
 - `src/types.rs` — CodeChunk, EmbeddingVector, IndexStatus
 - `src/config.rs` — walker/splitter configuration
-- `src/mcp/state.rs` — shared async state, concurrent index tracking
-- `src/mcp/indexer.rs` — 3-phase indexing pipeline with incremental support
+- `src/mcp/state.rs` — shared async state with Embedder/VectorStore enums
+- `src/mcp/indexer.rs` — indexing pipeline (lexical-only or full)
 - `src/mcp/hybrid.rs` — hybrid search (semantic + lexical fusion)
 - `src/mcp/manifest.rs` — index manifest for incremental reindexing
 - `src/mcp/tools.rs` — MCP tool definitions and JSON schemas
+- `src/vectordb/local.rs` — brute-force local vector store with disk persistence
+- `src/vectordb/client.rs` — Milvus REST API client
 
 ## MCP Tools
 
@@ -67,23 +80,16 @@ Tested backends:
 
 ## Environment Variables
 
-- `EMBEDDING_URL` — embedding API base URL (default: `http://localhost:8080/v1`). Any OpenAI-compatible endpoint.
+All optional. The server works with zero configuration.
+
+- `EMBEDDING_URL` — Embedding API base URL. Setting this enables semantic search. Any OpenAI-compatible endpoint.
 - `EMBEDDING_API_KEY` — API key for the embedding endpoint. Not needed for local servers.
-- `EMBEDDING_MODEL` — model name to request from the embedding API.
-- `EMBEDDING_DIMENSION` — vector dimension (default: `384`). Must match your model's output.
-- `MILVUS_URL` — Milvus/Zilliz Cloud endpoint (default: `http://localhost:19530`).
-- `MILVUS_TOKEN` — authentication token for Milvus. Not needed for local unauthenticated instances.
-- `MAX_FILE_SIZE` — maximum file size to process in bytes (default: `1048576`, 1MB).
-- `LOG_LEVEL` — logging verbosity: trace/debug/info/warn/error (default: `info`).
-
-## Running
-
-```bash
-cargo build --release
-./target/release/rust_sindexer
-```
-
-Communicates via stdin/stdout (MCP stdio transport).
+- `EMBEDDING_MODEL` — Model name (default: `all-minilm`).
+- `EMBEDDING_DIMENSION` — Vector dimension (default: `384`). Must match your model's output.
+- `MILVUS_URL` — Milvus/Zilliz Cloud endpoint. Setting this uses Milvus instead of the local vector store.
+- `MILVUS_TOKEN` — Authentication token for Milvus.
+- `MAX_FILE_SIZE` — Maximum file size in bytes (default: `1048576`, 1MB).
+- `LOG_LEVEL` — Logging verbosity: trace/debug/info/warn/error (default: `info`).
 
 ## Tests
 
@@ -92,22 +98,13 @@ cargo test              # all tests
 cargo test walker       # file discovery
 cargo test splitter     # AST parsing
 cargo test embedding    # embedding client
+cargo test local        # local vector store
+cargo test lexical      # BM25 search
 ```
-
-## Performance
-
-- Walker: `ignore` crate's thread pool with extension filtering during traversal
-- Splitter: rayon par_chunks for CPU-parallel AST parsing
-- Embedding: 100 texts per API batch
-- Vector insert: 500 docs per Milvus batch
-- Connection pooling: 32 idle HTTP connections per host
-- LTO enabled in release builds
-
-Defaults: 1MB max file size, 2500-char chunks, 300-char overlap, auto-detect CPU cores.
 
 ## Dependencies
 
-- **Core:** rmcp, tokio, rayon, ignore
+- **Core:** rmcp 1.5.0, tokio, rayon, ignore
 - **Parsing:** tree-sitter + language grammars
 - **HTTP:** reqwest with connection pooling and rustls-tls
 - **Concurrency:** dashmap, parking_lot
@@ -115,7 +112,7 @@ Defaults: 1MB max file size, 2500-char chunks, 300-char overlap, auto-detect CPU
 
 ## rmcp Usage Patterns
 
-This project uses rmcp 0.12. Key pattern:
+This project uses rmcp 1.5.0. Key pattern:
 
 ```rust
 #[derive(Clone)]
@@ -135,13 +132,12 @@ impl MyHandler {
     }
 }
 
-// Main: Router wraps handler and serves over stdio
-let router = Router::new(MyHandler::new());
-let service = router.serve((tokio::io::stdin(), tokio::io::stdout())).await?;
+// Main
+let tools = MyHandler::new();
+let transport = StdioTransport::new(tokio::io::stdin(), tokio::io::stdout());
+let service = tools.serve(transport).await?;
 service.waiting().await?;
 ```
-
-Key imports: `rmcp::{tool, tool_router, ServiceExt, handler::server::{tool::ToolRouter, router::Router}}`.
 
 ## Code Quality
 

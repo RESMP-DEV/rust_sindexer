@@ -1,9 +1,97 @@
 pub mod client;
+pub mod local;
 
 pub use client::{Document, InsertRow, MilvusClient, SearchHit};
+pub use local::LocalStore;
 
+use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::path::Path;
+
+/// Selects between a local brute-force vector store and a remote Milvus instance.
+pub enum VectorStore {
+    Local(LocalStore),
+    Milvus(MilvusClient),
+}
+
+impl VectorStore {
+    pub async fn create_collection(&self, name: &str, dimension: usize) -> Result<()> {
+        match self {
+            Self::Local(store) => store.create_collection(name, dimension),
+            Self::Milvus(client) => client.create_collection(name, dimension).await,
+        }
+    }
+
+    pub async fn has_collection(&self, name: &str) -> Result<bool> {
+        match self {
+            Self::Local(store) => store.has_collection(name),
+            Self::Milvus(client) => client.has_collection(name).await,
+        }
+    }
+
+    pub async fn drop_collection(&self, name: &str) -> Result<()> {
+        match self {
+            Self::Local(store) => store.drop_collection(name),
+            Self::Milvus(client) => client.drop_collection(name).await,
+        }
+    }
+
+    pub async fn insert_batch(&self, collection: &str, data: &[InsertRow]) -> Result<()> {
+        match self {
+            Self::Local(store) => {
+                let docs: Vec<_> = data
+                    .iter()
+                    .map(|row| local::LocalDoc {
+                        id: row.id.to_string(),
+                        content: row.content.clone(),
+                        vector: row.vector.clone(),
+                        metadata: row.metadata.clone(),
+                    })
+                    .collect();
+                store.insert_docs(collection, docs)
+            }
+            Self::Milvus(client) => client.insert_batch(collection, data).await,
+        }
+    }
+
+    pub async fn search(
+        &self,
+        collection: &str,
+        vector: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<SearchHit>> {
+        match self {
+            Self::Local(store) => store.search(collection, vector, top_k),
+            Self::Milvus(client) => client.search(collection, vector, top_k).await,
+        }
+    }
+
+    pub async fn delete_by_relative_paths(
+        &self,
+        collection: &str,
+        relative_paths: &[String],
+    ) -> Result<()> {
+        if relative_paths.is_empty() {
+            return Ok(());
+        }
+        match self {
+            Self::Local(store) => store.delete_by_filter(collection, relative_paths),
+            Self::Milvus(client) => {
+                let filter = build_relative_path_milvus_filter(relative_paths);
+                client.delete(collection, &filter).await
+            }
+        }
+    }
+}
+
+fn build_relative_path_milvus_filter(relative_paths: &[String]) -> String {
+    let serialized = relative_paths
+        .iter()
+        .map(|path| serde_json::to_string(path).expect("relative path must serialize"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("metadata[\"relative_path\"] in [{serialized}]")
+}
 
 /// Generate a sanitized, hashed collection name from a filesystem path.
 ///

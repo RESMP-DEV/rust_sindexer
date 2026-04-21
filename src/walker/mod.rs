@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use crate::config::{DEFAULT_IGNORE_PATTERNS, EXTENSIONLESS_FILES, SUPPORTED_EXTENSIONS};
+
 /// Walks a codebase to discover indexable files.
 ///
 /// Uses the `ignore` crate internally for parallel, gitignore-aware traversal.
@@ -18,37 +20,8 @@ impl CodeWalker {
     /// Create a new walker with default settings.
     pub fn new() -> Self {
         Self {
-            extensions: vec![
-                "rs".into(),
-                "py".into(),
-                "ts".into(),
-                "tsx".into(),
-                "js".into(),
-                "jsx".into(),
-                "go".into(),
-                "c".into(),
-                "cpp".into(),
-                "h".into(),
-                "hpp".into(),
-                "java".into(),
-                "kt".into(),
-                "swift".into(),
-                "rb".into(),
-                "php".into(),
-                "cs".into(),
-                "scala".into(),
-                "zig".into(),
-            ],
-            ignore_patterns: vec![
-                "node_modules".into(),
-                "target".into(),
-                ".git".into(),
-                "dist".into(),
-                "build".into(),
-                "__pycache__".into(),
-                ".venv".into(),
-                "venv".into(),
-            ],
+            extensions: SUPPORTED_EXTENSIONS.iter().map(|s| (*s).to_string()).collect(),
+            ignore_patterns: DEFAULT_IGNORE_PATTERNS.iter().map(|s| (*s).to_string()).collect(),
         }
     }
 
@@ -88,13 +61,18 @@ impl CodeWalker {
             Box::new(move |entry| {
                 if let Ok(entry) = entry {
                     if entry.file_type().is_some_and(|ft| ft.is_file()) {
-                        if let Some(ext) = entry.path().extension() {
-                            if extensions
+                        let include = if let Some(ext) = entry.path().extension() {
+                            extensions
                                 .iter()
                                 .any(|e| e == ext.to_string_lossy().as_ref())
-                            {
-                                files.lock().unwrap().push(entry.into_path());
-                            }
+                        } else if let Some(name) = entry.path().file_name() {
+                            let name_lower = name.to_string_lossy().to_lowercase();
+                            EXTENSIONLESS_FILES.contains(&name_lower.as_str())
+                        } else {
+                            false
+                        };
+                        if include {
+                            files.lock().unwrap().push(entry.into_path());
                         }
                     }
                 }

@@ -1,11 +1,7 @@
 //! High-performance parallel codebase indexer.
 //!
-//! This module provides the critical path for indexing codebases:
-//! 1. Walk files in parallel using ignore-based walker
-//! 2. Split files into chunks using rayon for CPU parallelism
-//! 3. Batch embed chunks (100 at a time) for efficient GPU/API utilization
-//! 4. Stream inserts into Milvus in small batches instead of buffering the
-//!    whole embedding set in memory first
+//! Pipeline: walk → split (rayon) → embed (batched) → insert (streamed).
+//! When embeddings are disabled, only the lexical index is populated.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -20,106 +16,73 @@ use tokio::task;
 use tracing::{debug, info, instrument, warn};
 
 use super::manifest::{diff_manifest_against_files, IndexInputs, ManifestStore};
-use crate::embedding::EmbeddingClient;
+use crate::embedding::Embedder;
 use crate::lexical::LexicalIndex;
 use crate::splitter::CodeSplitter;
 use crate::types::{CodeChunk, IndexState, IndexStatus};
+use crate::vectordb::{collection_name_from_path, InsertRow, VectorStore};
 use crate::vectordb::client::milvus_id_for_chunk_id;
-use crate::vectordb::{collection_name_from_path, InsertRow, MilvusClient};
 use crate::walker::CodeWalker;
 
-/// Batch size for embedding requests - balances throughput vs memory.
 const EMBEDDING_BATCH_SIZE: usize = 100;
-
-/// Batch size for Milvus insertions - larger batches are more efficient.
 const MILVUS_BATCH_SIZE: usize = 500;
-
-/// Number of files to process in parallel during splitting phase.
 const FILE_PARALLEL_CHUNK_SIZE: usize = 64;
 
-/// Result of a completed indexing operation.
 #[derive(Debug, Clone)]
 pub struct IndexResult {
-    /// Total number of files processed.
     pub files_processed: usize,
-    /// Total number of chunks created.
     pub chunks_created: usize,
-    /// Total number of embeddings generated.
     pub embeddings_generated: usize,
-    /// Total number of vectors inserted into Milvus.
     pub vectors_inserted: usize,
-    /// Time taken for the entire operation.
     pub duration_ms: u64,
-    /// Any warnings encountered during indexing.
     pub warnings: Vec<String>,
+    pub lexical_only: bool,
 }
 
-/// Shared state for the indexer, including indexing status.
 pub struct IndexerState {
-    /// Current indexing status, updated throughout the process.
     pub indexing_status: Arc<RwLock<IndexStatus>>,
-    /// Code walker for discovering files.
     pub walker: Arc<CodeWalker>,
-    /// Code splitter for chunking files.
     pub splitter: Arc<CodeSplitter>,
-    /// Embedding client for generating vectors.
-    pub embedding_client: Arc<EmbeddingClient>,
-    /// Milvus client for vector storage.
-    pub milvus_client: Arc<MilvusClient>,
-    /// Manifest store for incremental indexing.
+    pub embedder: Arc<Embedder>,
+    pub vector_store: Arc<VectorStore>,
     pub manifest_store: ManifestStore,
-    /// Embedding vector dimension used when creating Milvus collections.
     pub embedding_dimension: usize,
 }
 
 impl IndexerState {
-    /// Create a new indexer state with the given components.
     pub fn new(
         walker: CodeWalker,
         splitter: CodeSplitter,
-        embedding_client: EmbeddingClient,
-        milvus_client: MilvusClient,
+        embedder: Embedder,
+        vector_store: VectorStore,
         embedding_dimension: usize,
     ) -> Self {
         Self {
             indexing_status: Arc::new(RwLock::new(IndexStatus::default())),
             walker: Arc::new(walker),
             splitter: Arc::new(splitter),
-            embedding_client: Arc::new(embedding_client),
-            milvus_client: Arc::new(milvus_client),
+            embedder: Arc::new(embedder),
+            vector_store: Arc::new(vector_store),
             manifest_store: ManifestStore,
             embedding_dimension,
         }
     }
 
-    /// Get the current indexing status.
     pub async fn get_status(&self) -> IndexStatus {
         self.indexing_status.read().await.clone()
     }
 }
 
-/// Index a codebase at the given path.
-///
-/// This is the critical path - optimized for maximum parallelism:
-/// - File discovery runs in parallel threads via ignore crate
-/// - File splitting uses rayon for CPU-bound parallel processing
-/// - Embedding happens in batches of 100 for efficient API/GPU usage
-/// - Milvus insertion uses larger batches of 500 for network efficiency
-///
-/// # Arguments
-/// * `state` - Shared context state with clients and status
-/// * `path` - Root path of the codebase to index
-/// * `force` - If true, re-index even if already indexed
-///
-/// # Returns
-/// * `Ok(IndexResult)` - Summary of the indexing operation
-/// * `Err` - If any critical error occurs
 #[instrument(skip(state), fields(path = %path.display()))]
-pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> Result<IndexResult> {
+pub async fn index_codebase(
+    state: &IndexerState,
+    path: &Path,
+    force: bool,
+) -> Result<IndexResult> {
     let start = Instant::now();
     let mut warnings = Vec::new();
+    let embeddings_enabled = state.embedder.is_enabled();
 
-    // Check if already indexing
     {
         let status = state.indexing_status.read().await;
         if status.status == IndexState::Indexing && !force {
@@ -127,7 +90,6 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
         }
     }
 
-    // Initialize status
     {
         let mut status = state.indexing_status.write().await;
         *status = IndexStatus {
@@ -150,7 +112,7 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
         &state.walker.ignore_patterns,
     );
 
-    // Phase 1: Walk files (parallel via ignore crate)
+    // Phase 1: Walk files
     let files = match state.walker.walk(path).await {
         Ok(files) => files,
         Err(e) => {
@@ -200,6 +162,7 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
                         vectors_inserted: 0,
                         duration_ms: start.elapsed().as_millis() as u64,
                         warnings: vec!["already up to date".to_string()],
+                        lexical_only: !embeddings_enabled,
                     });
                 }
 
@@ -230,9 +193,11 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
         }
     }
 
-    if let Err(e) = prepare_vector_index(state, &collection_name, full_reindex).await {
-        update_status_failed(state, path).await;
-        return Err(e).context("Failed to prepare Milvus collection");
+    if embeddings_enabled {
+        if let Err(e) = prepare_vector_index(state, &collection_name, full_reindex).await {
+            update_status_failed(state, path).await;
+            return Err(e).context("Failed to prepare vector collection");
+        }
     }
 
     if let Err(e) = prepare_lexical_index(path, &stale_relative_paths, full_reindex).await {
@@ -240,9 +205,12 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
         return Err(e).context("Failed to prepare lexical index");
     }
 
-    if !stale_relative_paths.is_empty() {
-        let filter = build_relative_path_filter(&stale_relative_paths);
-        if let Err(e) = state.milvus_client.delete(&collection_name, &filter).await {
+    if !stale_relative_paths.is_empty() && embeddings_enabled {
+        if let Err(e) = state
+            .vector_store
+            .delete_by_relative_paths(&collection_name, &stale_relative_paths)
+            .await
+        {
             update_status_failed(state, path).await;
             return Err(e).context("Failed to delete stale vectors");
         }
@@ -271,16 +239,16 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
             vectors_inserted: 0,
             duration_ms: start.elapsed().as_millis() as u64,
             warnings,
+            lexical_only: !embeddings_enabled,
         });
     }
 
-    // Phase 2: Split files into chunks using rayon (CPU-parallel)
+    // Phase 2: Split files into chunks (rayon)
     let processed_files = Arc::new(AtomicUsize::new(0));
     let splitter = state.splitter.clone();
     let status_ref = state.indexing_status.clone();
     let processed_ref = processed_files.clone();
 
-    // Use rayon's parallel iterator for CPU-bound splitting
     let chunk_results: Vec<Result<Vec<CodeChunk>, String>> = files_to_index
         .par_chunks(FILE_PARALLEL_CHUNK_SIZE)
         .flat_map(|file_batch| {
@@ -288,9 +256,7 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
                 match splitter.split_file(file_path) {
                     Ok(chunks) => {
                         let count = processed_ref.fetch_add(1, Ordering::Relaxed) + 1;
-                        // Update status periodically (every 10 files to reduce lock contention)
                         if count.is_multiple_of(10) {
-                            // We can't await in rayon, so we use try_write
                             if let Ok(mut status) = status_ref.try_write() {
                                 status.processed_files = count;
                                 let snapshot = status.clone();
@@ -309,7 +275,6 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
         })
         .collect();
 
-    // Collect chunks and warnings
     let mut all_chunks = Vec::new();
     for result in chunk_results {
         match result {
@@ -333,7 +298,7 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
         let _ = state.manifest_store.write_status(path, &status);
     }
 
-    // Keep the lexical index in sync with the chunk set before embeddings/Milvus insertion.
+    // Populate lexical index
     let lexical_chunks = all_chunks.clone();
     let lexical_path = path.to_path_buf();
     if let Err(e) = task::spawn_blocking(move || -> Result<()> {
@@ -367,122 +332,120 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
             vectors_inserted: 0,
             duration_ms: start.elapsed().as_millis() as u64,
             warnings,
+            lexical_only: !embeddings_enabled,
         });
     }
 
-    // Phase 3/4: Stream embedding + insertion in small batches so the first
-    // successful Milvus writes land early and progress survives long runs.
-    let embedding_client = state.embedding_client.clone();
-    let milvus_client = state.milvus_client.clone();
-
-    let chunk_batches: Vec<_> = all_chunks.chunks(EMBEDDING_BATCH_SIZE).collect();
-    let num_embedding_batches = chunk_batches.len();
-    info!(
-        "Streaming embeddings + inserts in {} batches of {}",
-        num_embedding_batches, EMBEDDING_BATCH_SIZE
-    );
-
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
-    let mut batch_handles = FuturesUnordered::new();
+    // Phase 3/4: Embed + insert (skipped when embeddings are disabled)
     let mut embeddings_generated = 0usize;
     let mut vectors_inserted = 0usize;
-    let mut batch_failures = Vec::new();
 
-    for batch in chunk_batches {
-        let batch_chunks: Vec<CodeChunk> = batch.to_vec();
-        let client = embedding_client.clone();
-        let milvus = milvus_client.clone();
-        let collection = collection_name.clone();
-        let permit = semaphore.clone().acquire_owned().await?;
+    if embeddings_enabled {
+        let embedder = state.embedder.clone();
+        let vector_store = state.vector_store.clone();
 
-        batch_handles.push(tokio::spawn(async move {
-            let batch_texts: Vec<String> = batch_chunks.iter().map(|c| c.content.clone()).collect();
-            let embeddings = client.embed_batch(&batch_texts).await?;
-            let insert_rows: Vec<InsertRow> = batch_chunks
-                .into_iter()
-                .zip(embeddings.into_iter())
-                .map(|(chunk, embedding)| InsertRow {
-                    id: milvus_id_for_chunk_id(&chunk.id),
-                    content: chunk.content.clone(),
-                    vector: embedding.vector,
-                    metadata: serde_json::json!({
-                        "file_path": chunk.file_path,
-                        "relative_path": chunk.relative_path,
-                        "start_line": chunk.start_line,
-                        "end_line": chunk.end_line,
-                        "language": chunk.language,
-                    }),
-                })
-                .collect();
+        let chunk_batches: Vec<_> = all_chunks.chunks(EMBEDDING_BATCH_SIZE).collect();
+        let num_embedding_batches = chunk_batches.len();
+        info!(
+            "Streaming embeddings + inserts in {} batches of {}",
+            num_embedding_batches, EMBEDDING_BATCH_SIZE
+        );
 
-            let mut inserted = 0usize;
-            for rows in insert_rows.chunks(MILVUS_BATCH_SIZE) {
-                milvus.insert_batch(&collection, rows).await?;
-                inserted += rows.len();
-            }
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+        let mut batch_handles = FuturesUnordered::new();
+        let mut batch_failures = Vec::new();
 
-            drop(permit);
-            Ok::<(usize, usize), anyhow::Error>((batch_texts.len(), inserted))
-        }));
-    }
+        for batch in chunk_batches {
+            let batch_chunks: Vec<CodeChunk> = batch.to_vec();
+            let emb = embedder.clone();
+            let vs = vector_store.clone();
+            let collection = collection_name.clone();
+            let permit = semaphore.clone().acquire_owned().await?;
 
-    while let Some(handle) = batch_handles.next().await {
-        match handle {
-            Ok(Ok((embedded, inserted))) => {
-                embeddings_generated += embedded;
-                vectors_inserted += inserted;
-                info!(
-                    "Streaming progress: embeddings_generated={} vectors_inserted={}",
-                    embeddings_generated, vectors_inserted
-                );
-                let mut status = state.indexing_status.write().await;
-                status.embeddings_generated = embeddings_generated;
-                status.vectors_inserted = vectors_inserted;
-                let _ = state.manifest_store.write_status(path, &status);
-            }
-            Ok(Err(e)) => {
-                warn!("Streaming batch failed: {}", e);
-                batch_failures.push(format!("Streaming batch failed: {}", e));
-            }
-            Err(e) => {
-                warn!("Streaming batch task panicked: {}", e);
-                batch_failures.push(format!("Streaming batch task panicked: {}", e));
+            batch_handles.push(tokio::spawn(async move {
+                let batch_texts: Vec<String> =
+                    batch_chunks.iter().map(|c| c.content.clone()).collect();
+                let embeddings = emb.embed_batch(&batch_texts).await?;
+                let insert_rows: Vec<InsertRow> = batch_chunks
+                    .into_iter()
+                    .zip(embeddings.into_iter())
+                    .map(|(chunk, embedding)| InsertRow {
+                        id: milvus_id_for_chunk_id(&chunk.id),
+                        content: chunk.content.clone(),
+                        vector: embedding.vector,
+                        metadata: serde_json::json!({
+                            "file_path": chunk.file_path,
+                            "relative_path": chunk.relative_path,
+                            "start_line": chunk.start_line,
+                            "end_line": chunk.end_line,
+                            "language": chunk.language,
+                        }),
+                    })
+                    .collect();
+
+                let mut inserted = 0usize;
+                for rows in insert_rows.chunks(MILVUS_BATCH_SIZE) {
+                    vs.insert_batch(&collection, rows).await?;
+                    inserted += rows.len();
+                }
+
+                drop(permit);
+                Ok::<(usize, usize), anyhow::Error>((batch_texts.len(), inserted))
+            }));
+        }
+
+        while let Some(handle) = batch_handles.next().await {
+            match handle {
+                Ok(Ok((embedded, inserted))) => {
+                    embeddings_generated += embedded;
+                    vectors_inserted += inserted;
+                    info!(
+                        "Streaming progress: embeddings_generated={} vectors_inserted={}",
+                        embeddings_generated, vectors_inserted
+                    );
+                    let mut status = state.indexing_status.write().await;
+                    status.embeddings_generated = embeddings_generated;
+                    status.vectors_inserted = vectors_inserted;
+                    let _ = state.manifest_store.write_status(path, &status);
+                }
+                Ok(Err(e)) => {
+                    warn!("Streaming batch failed: {}", e);
+                    batch_failures.push(format!("Streaming batch failed: {}", e));
+                }
+                Err(e) => {
+                    warn!("Streaming batch task panicked: {}", e);
+                    batch_failures.push(format!("Streaming batch task panicked: {}", e));
+                }
             }
         }
-    }
 
-    if !batch_failures.is_empty() {
-        update_status_failed(state, path).await;
-        anyhow::bail!(
-            "Streaming index failed after inserting {} vectors: {}",
-            vectors_inserted,
-            batch_failures.join("; ")
-        );
-    }
+        if !batch_failures.is_empty() {
+            update_status_failed(state, path).await;
+            anyhow::bail!(
+                "Streaming index failed after inserting {} vectors: {}",
+                vectors_inserted,
+                batch_failures.join("; ")
+            );
+        }
 
-    info!("Generated {} embeddings", embeddings_generated);
+        if embeddings_generated == 0 {
+            update_status_failed(state, path).await;
+            anyhow::bail!("Failed to generate any embeddings");
+        }
 
-    if embeddings_generated == 0 {
-        update_status_failed(state, path).await;
-        anyhow::bail!("Failed to generate any embeddings");
-    }
-
-    info!("Using collection: {}", collection_name);
-
-    info!("Inserted {} vectors into Milvus", vectors_inserted);
-
-    if vectors_inserted == 0 {
-        update_status_failed(state, path).await;
-        anyhow::bail!(
-            "Generated {} chunks and {} embeddings, but inserted 0 vectors into Milvus{}",
-            total_chunks,
-            embeddings_generated,
-            if warnings.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", warnings.join("; "))
-            }
-        );
+        if vectors_inserted == 0 {
+            update_status_failed(state, path).await;
+            anyhow::bail!(
+                "Generated {} chunks and {} embeddings, but inserted 0 vectors{}",
+                total_chunks,
+                embeddings_generated,
+                if warnings.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", warnings.join("; "))
+                }
+            );
+        }
     }
 
     if let Err(e) =
@@ -494,13 +457,12 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
         return Err(e).context("Failed to write index manifest");
     }
 
-    // Update final status
     update_status_completed(state, path, total_chunks).await;
 
     let duration_ms = start.elapsed().as_millis() as u64;
     info!(
-        "Indexing completed in {}ms: {} files, {} chunks, {} vectors",
-        duration_ms, total_files, total_chunks, vectors_inserted
+        "Indexing completed in {}ms: {} files, {} chunks, {} vectors (lexical_only={})",
+        duration_ms, total_files, total_chunks, vectors_inserted, !embeddings_enabled
     );
 
     Ok(IndexResult {
@@ -510,12 +472,10 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
         vectors_inserted,
         duration_ms,
         warnings,
+        lexical_only: !embeddings_enabled,
     })
 }
 
-/// Spawn background indexing task.
-///
-/// Returns immediately with a handle that can be used to await completion.
 pub fn spawn_index_codebase(
     state: Arc<IndexerState>,
     path: std::path::PathBuf,
@@ -543,13 +503,13 @@ async fn prepare_vector_index(
     collection_name: &str,
     full_reindex: bool,
 ) -> Result<()> {
-    if full_reindex && state.milvus_client.has_collection(collection_name).await? {
-        state.milvus_client.drop_collection(collection_name).await?;
+    if full_reindex && state.vector_store.has_collection(collection_name).await? {
+        state.vector_store.drop_collection(collection_name).await?;
     }
 
-    if !state.milvus_client.has_collection(collection_name).await? {
+    if !state.vector_store.has_collection(collection_name).await? {
         state
-            .milvus_client
+            .vector_store
             .create_collection(collection_name, state.embedding_dimension)
             .await?;
     }
@@ -577,15 +537,6 @@ fn relative_path(root: &Path, file_path: &Path) -> String {
         .unwrap_or(file_path)
         .to_string_lossy()
         .to_string()
-}
-
-fn build_relative_path_filter(relative_paths: &[String]) -> String {
-    let serialized = relative_paths
-        .iter()
-        .map(|path| serde_json::to_string(path).expect("relative path must serialize"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("metadata[\"relative_path\"] in [{serialized}]")
 }
 
 #[cfg(test)]
@@ -874,20 +825,34 @@ mod tests {
             vectors_inserted: 0,
             duration_ms: 0,
             warnings: vec![],
+            lexical_only: false,
         };
         assert_eq!(result.files_processed, 0);
     }
 
-    #[test]
-    fn test_build_relative_path_filter() {
-        let filter = build_relative_path_filter(&[
-            "src/lib.rs".to_string(),
-            "src/nested/mod.rs".to_string(),
-        ]);
-        assert_eq!(
-            filter,
-            "metadata[\"relative_path\"] in [\"src/lib.rs\", \"src/nested/mod.rs\"]"
-        );
+    fn make_test_indexer_state(
+        root: &Path,
+        embedding_url: &str,
+        milvus_url: &str,
+        dimension: usize,
+    ) -> IndexerState {
+        IndexerState::new(
+            CodeWalker::new(),
+            CodeSplitter::new(SplitterConfig {
+                root_path: root.to_path_buf(),
+                max_chunk_bytes: Config::default().chunk_size,
+                overlap_lines: Config::default().chunk_overlap / 80,
+                ..SplitterConfig::default()
+            }),
+            Embedder::Http(EmbeddingClient::new(EmbeddingConfig {
+                url: format!("{}/v1/embeddings", embedding_url),
+                model: "test".to_string(),
+                batch_size: 100,
+                api_key: None,
+            })),
+            VectorStore::Milvus(MilvusClient::new(milvus_url, None)),
+            dimension,
+        )
     }
 
     #[tokio::test]
@@ -918,25 +883,7 @@ mod tests {
         }))
         .await;
 
-        let state = IndexerState {
-            indexing_status: Arc::new(RwLock::new(IndexStatus::default())),
-            walker: Arc::new(CodeWalker::new()),
-            splitter: Arc::new(CodeSplitter::new(SplitterConfig {
-                root_path: root.to_path_buf(),
-                max_chunk_bytes: Config::default().chunk_size,
-                overlap_lines: Config::default().chunk_overlap / 80,
-                ..SplitterConfig::default()
-            })),
-            embedding_client: Arc::new(EmbeddingClient::new(EmbeddingConfig {
-                url: format!("{}/v1/embeddings", embedding.base_url),
-                model: "test".to_string(),
-                batch_size: 100,
-                api_key: None,
-            })),
-            milvus_client: Arc::new(MilvusClient::new(&milvus.base_url, None)),
-            manifest_store: ManifestStore,
-            embedding_dimension: 3,
-        };
+        let state = make_test_indexer_state(root, &embedding.base_url, &milvus.base_url, 3);
 
         let first_result = index_codebase(&state, root, false).await.unwrap();
         assert!(first_result.files_processed >= 2);
@@ -982,25 +929,7 @@ mod tests {
         let milvus = spawn_stateful_mock_milvus_server(milvus_state).await;
         let embedding = spawn_dynamic_mock_embedding_server().await;
 
-        let state = IndexerState {
-            indexing_status: Arc::new(RwLock::new(IndexStatus::default())),
-            walker: Arc::new(CodeWalker::new()),
-            splitter: Arc::new(CodeSplitter::new(SplitterConfig {
-                root_path: root.to_path_buf(),
-                max_chunk_bytes: Config::default().chunk_size,
-                overlap_lines: Config::default().chunk_overlap / 80,
-                ..SplitterConfig::default()
-            })),
-            embedding_client: Arc::new(EmbeddingClient::new(EmbeddingConfig {
-                url: format!("{}/v1/embeddings", embedding.base_url),
-                model: "test".to_string(),
-                batch_size: 100,
-                api_key: None,
-            })),
-            milvus_client: Arc::new(MilvusClient::new(&milvus.base_url, None)),
-            manifest_store: ManifestStore,
-            embedding_dimension: 4,
-        };
+        let state = make_test_indexer_state(root, &embedding.base_url, &milvus.base_url, 4);
 
         let first_result = index_codebase(&state, root, false).await.unwrap();
         let forced_result = index_codebase(&state, root, true).await.unwrap();
@@ -1058,33 +987,41 @@ mod tests {
         }))
         .await;
 
-        let state = IndexerState {
-            indexing_status: Arc::new(RwLock::new(IndexStatus::default())),
-            walker: Arc::new(CodeWalker::new()),
-            splitter: Arc::new(CodeSplitter::new(SplitterConfig {
-                root_path: root.to_path_buf(),
-                max_chunk_bytes: Config::default().chunk_size,
-                overlap_lines: Config::default().chunk_overlap / 80,
-                ..SplitterConfig::default()
-            })),
-            embedding_client: Arc::new(EmbeddingClient::new(EmbeddingConfig {
-                url: format!("{}/v1/embeddings", embedding.base_url),
-                model: "test".to_string(),
-                batch_size: 100,
-                api_key: None,
-            })),
-            milvus_client: Arc::new(MilvusClient::new(&milvus.base_url, None)),
-            manifest_store: ManifestStore,
-            embedding_dimension: 3,
-        };
+        let state = make_test_indexer_state(root, &embedding.base_url, &milvus.base_url, 3);
 
         let err = index_codebase(&state, root, true).await.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Streaming index failed after inserting 0 vectors"));
+        assert!(err.to_string().contains("insert"));
         assert_eq!(state.get_status().await.status, IndexState::Failed);
 
         embedding.wait().await;
         milvus.wait().await;
+    }
+
+    #[tokio::test]
+    async fn test_lexical_only_indexing() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        let cache_dir = TempDir::new().unwrap();
+        let _cache_lock = set_test_cache_dir_async(cache_dir.path()).await;
+        fs::write(root.join("main.py"), "def add(a, b):\n    return a + b\n").unwrap();
+
+        let state = IndexerState::new(
+            CodeWalker::new(),
+            CodeSplitter::new(SplitterConfig {
+                root_path: root.to_path_buf(),
+                max_chunk_bytes: Config::default().chunk_size,
+                overlap_lines: Config::default().chunk_overlap / 80,
+                ..SplitterConfig::default()
+            }),
+            Embedder::Disabled,
+            VectorStore::Local(crate::vectordb::LocalStore::new()),
+            384,
+        );
+
+        let result = index_codebase(&state, root, true).await.unwrap();
+        assert!(result.lexical_only);
+        assert_eq!(result.embeddings_generated, 0);
+        assert_eq!(result.vectors_inserted, 0);
+        assert!(result.chunks_created > 0);
     }
 }

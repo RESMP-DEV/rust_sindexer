@@ -3,8 +3,6 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::types::CodeChunk;
-
 /// A document to be inserted into Milvus.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Document {
@@ -444,50 +442,6 @@ impl MilvusClient {
         }
 
         Ok(())
-    }
-
-    /// Insert code chunks with their embeddings into a collection.
-    ///
-    /// # Arguments
-    /// * `collection` - Collection name
-    /// * `chunks` - Code chunks to insert
-    /// * `embeddings` - Corresponding embedding vectors (must match chunks length)
-    pub async fn insert_with_embeddings(
-        &self,
-        collection: &str,
-        chunks: Vec<CodeChunk>,
-        embeddings: &[Vec<f32>],
-    ) -> Result<()> {
-        if chunks.is_empty() {
-            return Ok(());
-        }
-
-        if chunks.len() != embeddings.len() {
-            anyhow::bail!(
-                "chunks and embeddings length mismatch: {} vs {}",
-                chunks.len(),
-                embeddings.len()
-            );
-        }
-
-        let rows: Vec<InsertRow> = chunks
-            .into_iter()
-            .zip(embeddings.iter())
-            .map(|(chunk, embedding)| InsertRow {
-                id: milvus_id_for_chunk_id(&chunk.id),
-                content: chunk.content,
-                vector: embedding.clone(),
-                metadata: serde_json::json!({
-                    "file_path": chunk.file_path,
-                    "relative_path": chunk.relative_path,
-                    "start_line": chunk.start_line,
-                    "end_line": chunk.end_line,
-                    "language": chunk.language,
-                }),
-            })
-            .collect();
-
-        self.insert_batch(collection, &rows).await
     }
 
     /// Drop a collection.

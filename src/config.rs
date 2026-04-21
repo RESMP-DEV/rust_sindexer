@@ -76,7 +76,7 @@ impl Default for Config {
             max_file_size: 1024 * 1024, // 1 MB
             follow_symlinks: false,
             parallelism: 0,
-            embedding_dimension: 1024,
+            embedding_dimension: 384,
         }
     }
 }

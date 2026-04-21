@@ -169,6 +169,33 @@ impl EmbeddingClient {
     }
 }
 
+/// Embedding backend selector. When no embedding service is configured,
+/// the server operates in lexical-only mode.
+pub enum Embedder {
+    Http(EmbeddingClient),
+    Disabled,
+}
+
+impl Embedder {
+    pub fn is_enabled(&self) -> bool {
+        matches!(self, Self::Http(_))
+    }
+
+    pub async fn embed(&self, text: &str) -> Result<EmbeddingVector> {
+        match self {
+            Self::Http(client) => client.embed(text).await,
+            Self::Disabled => anyhow::bail!("Embedding is disabled. Set EMBEDDING_URL to enable semantic search."),
+        }
+    }
+
+    pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<EmbeddingVector>> {
+        match self {
+            Self::Http(client) => client.embed_batch(texts).await,
+            Self::Disabled => anyhow::bail!("Embedding is disabled. Set EMBEDDING_URL to enable semantic search."),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

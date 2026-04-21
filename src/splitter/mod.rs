@@ -273,7 +273,8 @@ fn split_markdown_chunks(
 }
 
 fn is_markdown_heading(line: &str) -> bool {
-    line.starts_with("# ") || line.starts_with("## ")
+    let trimmed = line.trim_start_matches('#');
+    trimmed.len() < line.len() && trimmed.starts_with(' ')
 }
 
 fn split_by_lines(

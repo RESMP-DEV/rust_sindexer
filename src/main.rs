@@ -8,7 +8,6 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing to stderr (stdout is reserved for MCP transport)
     tracing_subscriber::registry()
         .with(fmt::layer().with_writer(std::io::stderr))
         .with(EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()))
@@ -16,19 +15,14 @@ async fn main() -> Result<()> {
 
     tracing::info!("Starting rust_sindexer MCP server");
 
-    // Create the tool handler and serve directly
     let config = Config::from_env();
     let tools = CodebaseTools::with_state(create_shared_state(config));
-
-    // Serve MCP over stdio
     let transport = StdioTransport::new(tokio::io::stdin(), tokio::io::stdout());
-    let service = tools
-        .serve(transport)
-        .await?;
+
+    let service = tools.serve(transport).await?;
 
     tracing::info!("MCP server initialized, waiting for requests");
 
-    // Wait for service to complete
     match service.waiting().await {
         Ok(reason) => tracing::info!(?reason, "Server stopped"),
         Err(e) => tracing::error!(?e, "Server task failed"),
