@@ -90,6 +90,8 @@ impl EmbeddingClient {
         let client = Client::builder()
             .default_headers(headers)
             .pool_max_idle_per_host(32)
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(120))
             .build()
             .expect("failed to build HTTP client");
 
@@ -127,45 +129,69 @@ impl EmbeddingClient {
         Ok(all_embeddings)
     }
 
-    /// Embeds a single chunk of texts (up to batch_size).
+    /// Embeds a single chunk of texts (up to batch_size) with retry + backoff.
     async fn embed_chunk(&self, texts: &[String]) -> Result<Vec<EmbeddingVector>> {
-        let request = EmbeddingRequest {
-            input: texts,
-            model: &self.config.model,
-        };
+        const MAX_RETRIES: u32 = 3;
 
-        let response = self
-            .client
-            .post(&self.config.url)
-            .json(&request)
-            .send()
-            .await
-            .context("failed to send embedding request")?;
+        let mut last_err = None;
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                let backoff = std::time::Duration::from_millis(500 * 2u64.pow(attempt - 1));
+                tokio::time::sleep(backoff).await;
+            }
 
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("embedding API returned {status}: {body}");
+            let request = EmbeddingRequest {
+                input: texts,
+                model: &self.config.model,
+            };
+
+            let response = match self.client.post(&self.config.url).json(&request).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = Some(format!("request failed: {e}"));
+                    continue;
+                }
+            };
+
+            let status = response.status();
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || status.is_server_error()
+            {
+                let body = response.text().await.unwrap_or_default();
+                last_err = Some(format!("embedding API returned {status}: {body}"));
+                continue;
+            }
+
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                anyhow::bail!("embedding API returned {status}: {body}");
+            }
+
+            let response: EmbeddingResponse = response
+                .json()
+                .await
+                .context("failed to parse embedding response")?;
+
+            let embeddings = response
+                .data
+                .into_iter()
+                .map(|d| {
+                    let dimension = d.embedding.len();
+                    EmbeddingVector {
+                        vector: d.embedding,
+                        dimension,
+                    }
+                })
+                .collect();
+
+            return Ok(embeddings);
         }
 
-        let response: EmbeddingResponse = response
-            .json()
-            .await
-            .context("failed to parse embedding response")?;
-
-        let embeddings = response
-            .data
-            .into_iter()
-            .map(|d| {
-                let dimension = d.embedding.len();
-                EmbeddingVector {
-                    vector: d.embedding,
-                    dimension,
-                }
-            })
-            .collect();
-
-        Ok(embeddings)
+        anyhow::bail!(
+            "embedding failed after {} retries: {}",
+            MAX_RETRIES,
+            last_err.unwrap_or_else(|| "unknown error".to_string())
+        )
     }
 }
 

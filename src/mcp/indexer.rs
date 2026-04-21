@@ -47,6 +47,7 @@ pub struct IndexerState {
     pub vector_store: Arc<VectorStore>,
     pub manifest_store: ManifestStore,
     pub embedding_dimension: usize,
+    pub concurrency: usize,
 }
 
 impl IndexerState {
@@ -57,6 +58,17 @@ impl IndexerState {
         vector_store: VectorStore,
         embedding_dimension: usize,
     ) -> Self {
+        Self::with_concurrency(walker, splitter, embedder, vector_store, embedding_dimension, 16)
+    }
+
+    pub fn with_concurrency(
+        walker: CodeWalker,
+        splitter: CodeSplitter,
+        embedder: Embedder,
+        vector_store: VectorStore,
+        embedding_dimension: usize,
+        concurrency: usize,
+    ) -> Self {
         Self {
             indexing_status: Arc::new(RwLock::new(IndexStatus::default())),
             walker: Arc::new(walker),
@@ -65,6 +77,7 @@ impl IndexerState {
             vector_store: Arc::new(vector_store),
             manifest_store: ManifestStore,
             embedding_dimension,
+            concurrency: concurrency.max(1),
         }
     }
 
@@ -351,7 +364,7 @@ pub async fn index_codebase(
             num_embedding_batches, EMBEDDING_BATCH_SIZE
         );
 
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(state.concurrency));
         let mut batch_handles = FuturesUnordered::new();
         let mut batch_failures = Vec::new();
 

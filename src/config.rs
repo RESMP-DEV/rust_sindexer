@@ -72,7 +72,7 @@ impl Default for Config {
             chunk_size: 512,
             chunk_overlap: 64,
             batch_size: 32,
-            concurrency: 4,
+            concurrency: 16,
             max_file_size: 1024 * 1024, // 1 MB
             follow_symlinks: false,
             parallelism: 0,
@@ -104,7 +104,8 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(defaults.batch_size),
-            concurrency: env::var("CONCURRENCY")
+            concurrency: env::var("INDEXING_CONCURRENCY")
+                .or_else(|_| env::var("CONCURRENCY"))
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(defaults.concurrency),

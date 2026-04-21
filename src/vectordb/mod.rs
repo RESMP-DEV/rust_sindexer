@@ -1,7 +1,7 @@
 pub mod client;
 pub mod local;
 
-pub use client::{Document, InsertRow, MilvusClient, SearchHit};
+pub use client::{CollectionStats, Document, InsertRow, MilvusClient, SearchHit};
 pub use local::LocalStore;
 
 use anyhow::Result;
@@ -63,6 +63,22 @@ impl VectorStore {
         match self {
             Self::Local(store) => store.search(collection, vector, top_k),
             Self::Milvus(client) => client.search(collection, vector, top_k).await,
+        }
+    }
+
+    pub async fn list_collections(&self) -> Result<Vec<String>> {
+        match self {
+            Self::Local(store) => Ok(store.list_collections()),
+            Self::Milvus(client) => client.list_collections().await,
+        }
+    }
+
+    pub async fn collection_stats(&self, name: &str) -> Result<CollectionStats> {
+        match self {
+            Self::Local(store) => Ok(CollectionStats {
+                row_count: store.collection_size(name) as u64,
+            }),
+            Self::Milvus(client) => client.collection_stats(name).await,
         }
     }
 

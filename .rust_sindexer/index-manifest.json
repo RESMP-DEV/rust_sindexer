@@ -1,0 +1,206 @@
+{
+  "collection_name": "rust_sindexer_48c729cfa43dbb0a",
+  "inputs": {
+    "chunk_size": 512,
+    "overlap_lines": 0,
+    "min_chunk_lines": 5,
+    "target_chunk_lines": 50,
+    "extensions": [
+      "py",
+      "rs",
+      "js",
+      "ts",
+      "tsx",
+      "jsx",
+      "go",
+      "java",
+      "cpp",
+      "cc",
+      "cxx",
+      "c",
+      "h",
+      "hpp",
+      "rb",
+      "php",
+      "swift",
+      "kt",
+      "scala",
+      "cs",
+      "fs",
+      "ml",
+      "mli",
+      "hs",
+      "lua",
+      "sh",
+      "bash",
+      "zsh",
+      "pl",
+      "pm",
+      "r",
+      "jl",
+      "ex",
+      "exs",
+      "erl",
+      "hrl",
+      "clj",
+      "cljs",
+      "lisp",
+      "el",
+      "vim",
+      "sql",
+      "graphql",
+      "proto",
+      "thrift",
+      "yaml",
+      "yml",
+      "toml",
+      "json",
+      "xml",
+      "html",
+      "css",
+      "scss",
+      "sass",
+      "less",
+      "md",
+      "rst",
+      "tex"
+    ],
+    "ignore_patterns": [
+      "node_modules",
+      ".git",
+      ".hg",
+      ".svn",
+      "target",
+      "dist",
+      "build",
+      "__pycache__",
+      ".pytest_cache",
+      ".venv",
+      "venv",
+      ".tox",
+      ".eggs"
+    ]
+  },
+  "files": [
+    {
+      "relative_path": "AGENTS.md",
+      "sha256": "1f73ae1c354f7ef9372907ba6374c4477ff6661b8cd986ae9db6dab8576f8776"
+    },
+    {
+      "relative_path": "Cargo.toml",
+      "sha256": "70eef0eea8d6dcafe308e229248d03f9ea13cafa7cca248612e4c267ab588b83"
+    },
+    {
+      "relative_path": "README.md",
+      "sha256": "1c90d1c9672e26f8f845079a915a997051889a0366a7683712c0d92e493ac931"
+    },
+    {
+      "relative_path": "deny.toml",
+      "sha256": "16be730c5c99a0a52e1881d222919069e0a698ff0094b829bec5e9ac9b6a420a"
+    },
+    {
+      "relative_path": "docs/milvus-api.md",
+      "sha256": "d2b286af0c54d929d869eec70e879485f78b2f553b11c106713bb565f754a970"
+    },
+    {
+      "relative_path": "src/config.rs",
+      "sha256": "4903e7569967118cca146fb0e433263243ac9f086c1e0a4b6cb548c8e17a7ed0"
+    },
+    {
+      "relative_path": "src/embedding/mod.rs",
+      "sha256": "4f423c84f6a6006a365be7937cc130cfe9b61f93110defca515c5f142d600393"
+    },
+    {
+      "relative_path": "src/lexical/mod.rs",
+      "sha256": "77e8320601fcd4c64c9f5f4a723b933d1665ff10d4549fb96a8c710f06de2383"
+    },
+    {
+      "relative_path": "src/lib.rs",
+      "sha256": "12029541899763514be14f58e2ec5913595ac7febafcbd12770c21e6a85c2193"
+    },
+    {
+      "relative_path": "src/main.rs",
+      "sha256": "d727517417d9e2865d5e1fdde09ab479ba30cf295d5bc5e5b8fc7920ad40f233"
+    },
+    {
+      "relative_path": "src/mcp/hybrid.rs",
+      "sha256": "0ed78e29c599ea10e5784bab7f086047becf4ce5a7e085abc7ee5b2052667c8c"
+    },
+    {
+      "relative_path": "src/mcp/indexer.rs",
+      "sha256": "7faf17f1a3e3f851d47cc6124287bb8ce8bb16457f70f48cddf444ce7a0d0562"
+    },
+    {
+      "relative_path": "src/mcp/manifest.rs",
+      "sha256": "d4add5a821f0cec51c6d7887f496c0cb5e0741f380ebbed94285e646b577288d"
+    },
+    {
+      "relative_path": "src/mcp/mod.rs",
+      "sha256": "0e444bca1155d61119d6dbf70f8163d8c8c912d103406b1423d1fc17df2c8d99"
+    },
+    {
+      "relative_path": "src/mcp/state.rs",
+      "sha256": "dfc122df74dc7c71ac54f6e22f6abf1631f539d0f0be4d5f7e5ccaaf3a0ea046"
+    },
+    {
+      "relative_path": "src/mcp/tools.rs",
+      "sha256": "df7d80c746c827983981b205892b7a8e04f0969211481b8be526b70d8ee0a813"
+    },
+    {
+      "relative_path": "src/splitter/extractor.rs",
+      "sha256": "e480357e4b7af470527dadf074d53ffacbecd4dc15ea37bff3db1e655896d230"
+    },
+    {
+      "relative_path": "src/splitter/mod.rs",
+      "sha256": "85042d24c375fdd61b2ffc9504c8ef47aeb9b3254d9dfa334c61258ba8067045"
+    },
+    {
+      "relative_path": "src/splitter/node_types.rs",
+      "sha256": "f310eb7a2a3d55466fe89524fbc401c52d1e9c36742d52b07121740ccaaa92bf"
+    },
+    {
+      "relative_path": "src/splitter/parsers.rs",
+      "sha256": "9a8ec8046e34f77b66776a73acf7bb2a7f533cfec02ce446c931f8f8c5ca06ef"
+    },
+    {
+      "relative_path": "src/splitter/refine.rs",
+      "sha256": "c5b835fb10a57fe82ac5d5a816dea718abb714bb6f10a18b21fc3787e9daf591"
+    },
+    {
+      "relative_path": "src/types.rs",
+      "sha256": "e8261be11655272e401c784e8e67bd68eb22fa54e5d80c58c342a0f8fcc7e01b"
+    },
+    {
+      "relative_path": "src/vectordb/client.rs",
+      "sha256": "23a944ef3004bdf9c3c409bdfb49543b7cdead3d84ef287ae5419df75cbed944"
+    },
+    {
+      "relative_path": "src/vectordb/local.rs",
+      "sha256": "e6012b6b919923360e0a87c3e0556771ac7cc34245be933eeddfe3dac27366a3"
+    },
+    {
+      "relative_path": "src/vectordb/mod.rs",
+      "sha256": "d4d06086ed75c4e736b63448d58caccfa24dd19b8a99a70d586174c91afc5694"
+    },
+    {
+      "relative_path": "src/walker/mod.rs",
+      "sha256": "645fd69673f8e5489ce0878a3a604ae60b49dc2d26a43c9d94a07737d262ad12"
+    },
+    {
+      "relative_path": "tests/hybrid_search_test.rs",
+      "sha256": "2be81b37145ae856dd54d05fb9448080a41ea1f6c09c01be392728578c890237"
+    },
+    {
+      "relative_path": "tests/index_manifest_test.rs",
+      "sha256": "6d61091990afc5382b3c09f27b4447b82a2e11b02a821f37cd431f75efb51250"
+    },
+    {
+      "relative_path": "tests/splitter_test.rs",
+      "sha256": "6c7cb43dc74aa0d3a49552e102afde735ad17aa3e3314b429ee505f53f2325b7"
+    },
+    {
+      "relative_path": "tests/walker_test.rs",
+      "sha256": "e7292c93ca5892a4aa5086aa405beaa9963eab3563a1dd2dd04cf9fd98be0665"
+    }
+  ]
+}

@@ -85,12 +85,13 @@ fn create_indexer_state(state: &SharedState, root_path: &Path) -> Arc<IndexerSta
         VectorStore::Local(LocalStore::new())
     };
 
-    Arc::new(IndexerState::new(
+    Arc::new(IndexerState::with_concurrency(
         CodeWalker::new(),
         splitter,
         embedder,
         vector_store,
         config.embedding_dimension,
+        config.concurrency,
     ))
 }
 
@@ -124,6 +125,24 @@ pub struct GetIndexingStatusParams {
 pub struct ClearIndexParams {
     /// Absolute path to the codebase whose index should be cleared.
     pub path: String,
+}
+
+/// Parameters for listing collections (no params needed).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ListCollectionsParams {}
+
+/// Parameters for getting collection statistics.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CollectionStatsParams {
+    /// Exact collection name in Milvus/Zilliz.
+    pub collection_name: String,
+}
+
+/// Parameters for dropping a collection by name.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DropCollectionParams {
+    /// Exact collection name to drop.
+    pub collection_name: String,
 }
 
 // ============================================================================
@@ -182,6 +201,44 @@ pub struct ClearResult {
     pub message: String,
     /// Path whose index was cleared.
     pub path: PathBuf,
+}
+
+/// Info about a single collection.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CollectionInfo {
+    /// Collection name in the vector database.
+    pub name: String,
+    /// Number of vectors/rows in the collection.
+    pub row_count: u64,
+}
+
+/// Result of listing collections.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ListCollectionsResult {
+    /// All collections in the vector database.
+    pub collections: Vec<CollectionInfo>,
+    /// Total number of collections.
+    pub count: usize,
+}
+
+/// Result of getting collection statistics.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CollectionStatsResult {
+    /// Collection name.
+    pub collection_name: String,
+    /// Number of vectors/rows.
+    pub row_count: u64,
+}
+
+/// Result of dropping a collection.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DropCollectionResult {
+    /// Whether the drop succeeded.
+    pub success: bool,
+    /// Human-readable message.
+    pub message: String,
+    /// Collection that was dropped.
+    pub collection_name: String,
 }
 
 // ============================================================================
@@ -528,6 +585,105 @@ impl CodebaseTools {
             path,
         }))
     }
+
+    /// List all collections in the vector database.
+    #[tool(
+        name = "list_collections",
+        description = "List all collections in the vector database with row counts. \
+                       Use this to see what codebases are indexed and how large each index is."
+    )]
+    async fn list_collections(
+        &self,
+        _params: Parameters<ListCollectionsParams>,
+    ) -> Result<Json<ListCollectionsResult>, McpError> {
+        let names = self
+            .state
+            .vector_store
+            .list_collections()
+            .await
+            .map_err(|err| McpError::internal_error(err.to_string(), None))?;
+
+        let mut collections = Vec::with_capacity(names.len());
+        for name in &names {
+            let row_count = self
+                .state
+                .vector_store
+                .collection_stats(name)
+                .await
+                .map(|s| s.row_count)
+                .unwrap_or(0);
+            collections.push(CollectionInfo {
+                name: name.clone(),
+                row_count,
+            });
+        }
+
+        let count = collections.len();
+        Ok(Json(ListCollectionsResult { collections, count }))
+    }
+
+    /// Get statistics for a specific collection.
+    #[tool(
+        name = "collection_stats",
+        description = "Get statistics (row count) for a specific collection in the vector database."
+    )]
+    async fn collection_stats(
+        &self,
+        params: Parameters<CollectionStatsParams>,
+    ) -> Result<Json<CollectionStatsResult>, McpError> {
+        let params = params.0;
+        let stats = self
+            .state
+            .vector_store
+            .collection_stats(&params.collection_name)
+            .await
+            .map_err(|err| McpError::internal_error(err.to_string(), None))?;
+
+        Ok(Json(CollectionStatsResult {
+            collection_name: params.collection_name,
+            row_count: stats.row_count,
+        }))
+    }
+
+    /// Drop a collection by name.
+    #[tool(
+        name = "drop_collection",
+        description = "Drop a specific collection from the vector database by name. \
+                       This permanently deletes all vectors in the collection. \
+                       Use list_collections first to see available collections."
+    )]
+    async fn drop_collection(
+        &self,
+        params: Parameters<DropCollectionParams>,
+    ) -> Result<Json<DropCollectionResult>, McpError> {
+        let params = params.0;
+        let exists = self
+            .state
+            .vector_store
+            .has_collection(&params.collection_name)
+            .await
+            .map_err(|err| McpError::internal_error(err.to_string(), None))?;
+
+        if !exists {
+            return Ok(Json(DropCollectionResult {
+                success: false,
+                message: format!("Collection '{}' does not exist", params.collection_name),
+                collection_name: params.collection_name,
+            }));
+        }
+
+        self.state
+            .vector_store
+            .drop_collection(&params.collection_name)
+            .await
+            .map_err(|err| McpError::internal_error(err.to_string(), None))?;
+
+        Ok(Json(DropCollectionResult {
+            success: true,
+            message: format!("Dropped collection '{}'", params.collection_name),
+            collection_name: params.collection_name,
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -684,7 +840,7 @@ mod tests {
     fn test_codebase_tools_creation() {
         let tools = CodebaseTools::default();
         let all_tools = tools.router().list_all();
-        assert_eq!(all_tools.len(), 4); // index_codebase, search_code, get_indexing_status, clear_index
+        assert_eq!(all_tools.len(), 7); // index_codebase, search_code, get_indexing_status, clear_index, list_collections, collection_stats, drop_collection
     }
 
     #[tokio::test]

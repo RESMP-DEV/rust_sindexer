@@ -164,6 +164,31 @@ impl LocalStore {
             .collect())
     }
 
+    pub fn list_collections(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.collections.lock().keys().cloned().collect();
+        if let Ok(entries) = std::fs::read_dir(Self::storage_dir()) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.path().file_stem().and_then(|s| s.to_str()) {
+                    let name = name.to_string();
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+            }
+        }
+        names
+    }
+
+    pub fn collection_size(&self, name: &str) -> usize {
+        let collections = self.collections.lock();
+        if let Some(c) = collections.get(name) {
+            return c.docs.len();
+        }
+        self.load_collection(name)
+            .map(|c| c.docs.len())
+            .unwrap_or(0)
+    }
+
     pub fn delete_by_filter(
         &self,
         collection_name: &str,

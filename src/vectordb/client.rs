@@ -153,6 +153,45 @@ struct DropCollectionRequest {
     collection_name: String,
 }
 
+#[derive(Serialize)]
+struct ListCollectionsRequest {
+    #[serde(rename = "dbName")]
+    db_name: String,
+}
+
+#[derive(Deserialize)]
+struct ListCollectionsResponse {
+    code: i32,
+    data: Option<Vec<String>>,
+    message: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CollectionStatsRequest {
+    #[serde(rename = "dbName")]
+    db_name: String,
+    #[serde(rename = "collectionName")]
+    collection_name: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CollectionStats {
+    pub row_count: u64,
+}
+
+#[derive(Deserialize)]
+struct CollectionStatsResponse {
+    code: i32,
+    data: Option<CollectionStatsData>,
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CollectionStatsData {
+    #[serde(rename = "rowCount", default)]
+    row_count: u64,
+}
+
 impl MilvusClient {
     /// Create a new Milvus client.
     ///
@@ -172,6 +211,8 @@ impl MilvusClient {
         let client = Client::builder()
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .pool_max_idle_per_host(32)
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(60))
             .default_headers(headers)
             .build()
             .expect("failed to create HTTP client");
@@ -413,35 +454,134 @@ impl MilvusClient {
             return Ok(());
         }
 
+        const MAX_RETRIES: u32 = 3;
         let url = format!("{}/v2/vectordb/entities/insert", self.base_url);
 
-        let request = InsertRequest {
+        let request_body = InsertRequest {
             db_name: "default".to_string(),
             collection_name: collection.to_string(),
             data: data.to_vec(),
         };
+        let body_bytes = serde_json::to_vec(&request_body)
+            .context("failed to serialize insert batch request")?;
 
-        let response: MilvusResponse = self
+        let mut last_err = None;
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                let backoff = std::time::Duration::from_millis(500 * 2u64.pow(attempt - 1));
+                tokio::time::sleep(backoff).await;
+            }
+
+            let response = match self
+                .client
+                .post(&url)
+                .header("content-type", "application/json")
+                .body(body_bytes.clone())
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = Some(format!("request failed: {e}"));
+                    continue;
+                }
+            };
+
+            let status = response.status();
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+                let body = response.text().await.unwrap_or_default();
+                last_err = Some(format!("Milvus returned {status}: {body}"));
+                continue;
+            }
+
+            let response: MilvusResponse = response
+                .json()
+                .await
+                .context("failed to parse insert batch response")?;
+
+            if response.code != 0 {
+                anyhow::bail!(
+                    "insert batch failed: {}",
+                    response
+                        .message
+                        .unwrap_or_else(|| "unknown error".to_string())
+                );
+            }
+
+            return Ok(());
+        }
+
+        anyhow::bail!(
+            "insert batch failed after {} retries: {}",
+            MAX_RETRIES,
+            last_err.unwrap_or_else(|| "unknown error".to_string())
+        )
+    }
+
+    /// List all collections in the database.
+    pub async fn list_collections(&self) -> Result<Vec<String>> {
+        let url = format!("{}/v2/vectordb/collections/list", self.base_url);
+
+        let request = ListCollectionsRequest {
+            db_name: "default".to_string(),
+        };
+
+        let response: ListCollectionsResponse = self
             .client
             .post(&url)
             .json(&request)
             .send()
             .await
-            .context("failed to send insert batch request")?
+            .context("failed to send list collections request")?
             .json()
             .await
-            .context("failed to parse insert batch response")?;
+            .context("failed to parse list collections response")?;
 
         if response.code != 0 {
             anyhow::bail!(
-                "insert batch failed: {}",
+                "list collections failed: {}",
                 response
                     .message
                     .unwrap_or_else(|| "unknown error".to_string())
             );
         }
 
-        Ok(())
+        Ok(response.data.unwrap_or_default())
+    }
+
+    /// Get statistics for a collection (row count).
+    pub async fn collection_stats(&self, name: &str) -> Result<CollectionStats> {
+        let url = format!("{}/v2/vectordb/collections/get_stats", self.base_url);
+
+        let request = CollectionStatsRequest {
+            db_name: "default".to_string(),
+            collection_name: name.to_string(),
+        };
+
+        let response: CollectionStatsResponse = self
+            .client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .context("failed to send collection stats request")?
+            .json()
+            .await
+            .context("failed to parse collection stats response")?;
+
+        if response.code != 0 {
+            anyhow::bail!(
+                "collection stats failed: {}",
+                response
+                    .message
+                    .unwrap_or_else(|| "unknown error".to_string())
+            );
+        }
+
+        let data = response.data.unwrap_or(CollectionStatsData { row_count: 0 });
+        Ok(CollectionStats {
+            row_count: data.row_count,
+        })
     }
 
     /// Drop a collection.
