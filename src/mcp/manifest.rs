@@ -3,8 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracing::{debug, info};
 
 use crate::splitter;
 use crate::types::IndexStatus;
@@ -75,9 +77,11 @@ impl ManifestStore {
     pub fn load(&self, path: &Path) -> Result<Option<IndexManifest>> {
         let manifest_path = manifest_path(path);
         if !manifest_path.exists() {
+            debug!(path = %path.display(), "no manifest found");
             return Ok(None);
         }
 
+        debug!(path = %manifest_path.display(), "loading index manifest");
         let contents = fs::read_to_string(&manifest_path)
             .with_context(|| format!("failed to read manifest {}", manifest_path.display()))?;
         let manifest = serde_json::from_str(&contents)
@@ -92,6 +96,17 @@ impl ManifestStore {
         inputs: &IndexInputs,
         files: &[PathBuf],
     ) -> Result<()> {
+        let fingerprints = fingerprint_files(path, files)?;
+        self.write_with_fingerprints(path, collection_name, inputs, fingerprints)
+    }
+
+    pub fn write_with_fingerprints(
+        &self,
+        path: &Path,
+        collection_name: &str,
+        inputs: &IndexInputs,
+        fingerprints: Vec<FileFingerprint>,
+    ) -> Result<()> {
         let manifest_path = manifest_path(path);
         if let Some(parent) = manifest_path.parent() {
             fs::create_dir_all(parent).with_context(|| {
@@ -99,16 +114,18 @@ impl ManifestStore {
             })?;
         }
 
+        let file_count = fingerprints.len();
         let manifest = IndexManifest {
             collection_name: collection_name.to_string(),
             inputs: inputs.clone(),
-            files: fingerprint_files(path, files)?,
+            files: fingerprints,
         };
 
         let json =
             serde_json::to_string_pretty(&manifest).context("failed to serialize manifest")?;
         fs::write(&manifest_path, json)
             .with_context(|| format!("failed to write manifest {}", manifest_path.display()))?;
+        info!(path = %manifest_path.display(), files = file_count, "index manifest written");
         Ok(())
     }
 
@@ -154,23 +171,18 @@ impl ManifestStore {
 pub fn diff_manifest_against_files(
     previous: &IndexManifest,
     path: &Path,
-    collection_name: &str,
-    inputs: &IndexInputs,
+    _collection_name: &str,
+    _inputs: &IndexInputs,
     files: &[PathBuf],
-) -> Result<ManifestDiff> {
-    let current = IndexManifest {
-        collection_name: collection_name.to_string(),
-        inputs: inputs.clone(),
-        files: fingerprint_files(path, files)?,
-    };
+) -> Result<(ManifestDiff, Vec<FileFingerprint>)> {
+    let current_fingerprints = fingerprint_files(path, files)?;
 
     let previous_map: BTreeMap<_, _> = previous
         .files
         .iter()
         .map(|file| (file.relative_path.clone(), file.sha256.clone()))
         .collect();
-    let current_map: BTreeMap<_, _> = current
-        .files
+    let current_map: BTreeMap<_, _> = current_fingerprints
         .iter()
         .map(|file| (file.relative_path.clone(), file.sha256.clone()))
         .collect();
@@ -192,16 +204,24 @@ pub fn diff_manifest_against_files(
         .cloned()
         .collect::<Vec<_>>();
 
-    Ok(ManifestDiff {
+    let diff = ManifestDiff {
         added,
         modified,
         deleted,
-    })
+    };
+    info!(
+        added = diff.added.len(),
+        modified = diff.modified.len(),
+        deleted = diff.deleted.len(),
+        "manifest diff computed"
+    );
+    Ok((diff, current_fingerprints))
 }
 
-fn fingerprint_files(root: &Path, files: &[PathBuf]) -> Result<Vec<FileFingerprint>> {
-    let mut fingerprints = files
-        .iter()
+pub fn fingerprint_files(root: &Path, files: &[PathBuf]) -> Result<Vec<FileFingerprint>> {
+    debug!(root = %root.display(), file_count = files.len(), "fingerprinting files");
+    let results: Vec<Result<FileFingerprint>> = files
+        .par_iter()
         .map(|path| -> Result<FileFingerprint> {
             let contents = fs::read(path)
                 .with_context(|| format!("failed to read file for manifest {}", path.display()))?;
@@ -217,9 +237,10 @@ fn fingerprint_files(root: &Path, files: &[PathBuf]) -> Result<Vec<FileFingerpri
                 sha256: hex::encode(hasher.finalize()),
             })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect();
 
-    fingerprints.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    let mut fingerprints = results.into_iter().collect::<Result<Vec<_>>>()?;
+    fingerprints.sort_unstable_by(|a, b| a.relative_path.cmp(&b.relative_path));
     Ok(fingerprints)
 }
 
@@ -270,7 +291,7 @@ mod tests {
         };
 
         let files = vec![src.join("keep.rs"), src.join("new.rs")];
-        let diff =
+        let (diff, _fingerprints) =
             diff_manifest_against_files(&previous, root, "collection", &inputs, &files).unwrap();
 
         assert_eq!(diff.added, vec!["src/new.rs"]);

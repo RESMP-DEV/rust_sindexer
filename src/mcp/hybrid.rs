@@ -1,5 +1,6 @@
 use crate::types::CodeChunk;
 use std::collections::HashMap;
+use tracing::{debug, info};
 
 /// Result item for combined lexical / semantic retrieval flows.
 #[derive(Clone, Debug)]
@@ -22,6 +23,12 @@ pub fn fuse_hybrid_hits(
     lexical_hits: Vec<HybridHit>,
     options: &HybridFusionOptions,
 ) -> Vec<HybridHit> {
+    debug!(
+        semantic_count = semantic_hits.len(),
+        lexical_count = lexical_hits.len(),
+        limit = options.limit,
+        "fusing hybrid search hits"
+    );
     if options.limit == 0 {
         return Vec::new();
     }
@@ -39,6 +46,7 @@ pub fn fuse_hybrid_hits(
     let mut fused_hits: Vec<HybridHit> = fused.into_values().collect();
     fused_hits.sort_by(|left, right| right.score.total_cmp(&left.score));
     fused_hits.truncate(options.limit);
+    info!(result_count = fused_hits.len(), "hybrid fusion complete");
     fused_hits
 }
 

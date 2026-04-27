@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info, warn};
 
 use super::client::SearchHit;
 
@@ -56,6 +57,7 @@ impl LocalStore {
     }
 
     pub fn create_collection(&self, name: &str, dimension: usize) -> Result<()> {
+        debug!(collection = name, dimension, "Creating local collection");
         let mut collections = self.collections.lock();
         let collection = Collection {
             dimension,
@@ -63,6 +65,7 @@ impl LocalStore {
         };
         collections.insert(name.to_string(), collection.clone());
         self.persist_collection(name, &collection)?;
+        info!(collection = name, dimension, "Local collection created");
         Ok(())
     }
 
@@ -75,6 +78,7 @@ impl LocalStore {
     }
 
     pub fn drop_collection(&self, name: &str) -> Result<()> {
+        info!(collection = name, "Dropping local collection");
         self.collections.lock().remove(name);
         let path = Self::collection_path(name);
         if path.exists() {
@@ -91,6 +95,8 @@ impl LocalStore {
         if docs.is_empty() {
             return Ok(());
         }
+        let count = docs.len();
+        debug!(collection = collection_name, docs = count, "Inserting docs into local store");
         let mut collections = self.collections.lock();
         let collection = collections
             .entry(collection_name.to_string())
@@ -99,6 +105,7 @@ impl LocalStore {
             });
         collection.docs.extend(docs);
         self.persist_collection(collection_name, collection)?;
+        debug!(collection = collection_name, total_docs = collection.docs.len(), "Insert completed");
         Ok(())
     }
 
@@ -131,19 +138,23 @@ impl LocalStore {
         query_vector: &[f32],
         top_k: usize,
     ) -> Result<Vec<SearchHit>> {
+        let start = std::time::Instant::now();
         let mut collections = self.collections.lock();
         let collection = match collections.get(collection_name) {
             Some(c) => c,
             None => {
                 if let Some(loaded) = self.load_collection(collection_name) {
+                    debug!(collection = collection_name, docs = loaded.docs.len(), "Loaded collection from disk");
                     collections.insert(collection_name.to_string(), loaded);
                     collections.get(collection_name).unwrap()
                 } else {
+                    warn!(collection = collection_name, "Collection not found for search");
                     return Ok(Vec::new());
                 }
             }
         };
 
+        debug!(collection = collection_name, candidates = collection.docs.len(), top_k, "Brute-force cosine search");
         let mut scored: Vec<(f32, &LocalDoc)> = collection
             .docs
             .iter()
@@ -153,7 +164,7 @@ impl LocalStore {
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(top_k);
 
-        Ok(scored
+        let results: Vec<SearchHit> = scored
             .into_iter()
             .map(|(score, doc)| SearchHit {
                 id: doc.id.clone(),
@@ -161,7 +172,14 @@ impl LocalStore {
                 content: doc.content.clone(),
                 metadata: doc.metadata.clone(),
             })
-            .collect())
+            .collect();
+        debug!(
+            collection = collection_name,
+            results = results.len(),
+            elapsed_us = start.elapsed().as_micros() as u64,
+            "Local search completed"
+        );
+        Ok(results)
     }
 
     pub fn list_collections(&self) -> Vec<String> {
@@ -194,12 +212,14 @@ impl LocalStore {
         collection_name: &str,
         relative_paths: &[String],
     ) -> Result<()> {
+        debug!(collection = collection_name, paths = relative_paths.len(), "Deleting docs by relative path filter");
         let mut collections = self.collections.lock();
         let collection = match collections.get_mut(collection_name) {
             Some(c) => c,
             None => return Ok(()),
         };
 
+        let before = collection.docs.len();
         collection.docs.retain(|doc| {
             let doc_path = doc
                 .metadata
@@ -209,6 +229,8 @@ impl LocalStore {
             !relative_paths.iter().any(|p| p == doc_path)
         });
 
+        let deleted = before - collection.docs.len();
+        debug!(collection = collection_name, deleted, remaining = collection.docs.len(), "Delete filter applied");
         self.persist_collection(collection_name, collection)?;
         Ok(())
     }

@@ -7,6 +7,7 @@ pub use local::LocalStore;
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use tracing::{debug, info};
 
 /// Selects between a local brute-force vector store and a remote Milvus instance.
 pub enum VectorStore {
@@ -16,6 +17,7 @@ pub enum VectorStore {
 
 impl VectorStore {
     pub async fn create_collection(&self, name: &str, dimension: usize) -> Result<()> {
+        info!(collection = name, dimension, "creating collection");
         match self {
             Self::Local(store) => store.create_collection(name, dimension),
             Self::Milvus(client) => client.create_collection(name, dimension).await,
@@ -30,6 +32,7 @@ impl VectorStore {
     }
 
     pub async fn drop_collection(&self, name: &str) -> Result<()> {
+        info!(collection = name, "dropping collection");
         match self {
             Self::Local(store) => store.drop_collection(name),
             Self::Milvus(client) => client.drop_collection(name).await,
@@ -37,6 +40,7 @@ impl VectorStore {
     }
 
     pub async fn insert_batch(&self, collection: &str, data: &[InsertRow]) -> Result<()> {
+        debug!(collection, batch_size = data.len(), "inserting batch");
         match self {
             Self::Local(store) => {
                 let docs: Vec<_> = data
@@ -60,6 +64,7 @@ impl VectorStore {
         vector: &[f32],
         top_k: usize,
     ) -> Result<Vec<SearchHit>> {
+        debug!(collection, top_k, "searching vector store");
         match self {
             Self::Local(store) => store.search(collection, vector, top_k),
             Self::Milvus(client) => client.search(collection, vector, top_k).await,
@@ -90,6 +95,7 @@ impl VectorStore {
         if relative_paths.is_empty() {
             return Ok(());
         }
+        debug!(collection, path_count = relative_paths.len(), "deleting by relative paths");
         match self {
             Self::Local(store) => store.delete_by_filter(collection, relative_paths),
             Self::Milvus(client) => {

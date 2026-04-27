@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
+use tracing::debug;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::{
@@ -20,6 +22,7 @@ pub struct LexicalIndex {
 
 impl LexicalIndex {
     pub fn create(path: &Path) -> Result<Self> {
+        debug!(path = %path.display(), "creating lexical index");
         let index_path = cache_dir_for(path)?;
         fs::create_dir_all(&index_path).with_context(|| {
             format!(
@@ -78,6 +81,10 @@ impl LexicalIndex {
         if chunks.is_empty() {
             return Ok(());
         }
+        debug!(chunk_count = chunks.len(), "inserting chunks into lexical index");
+
+        let start = Instant::now();
+        tracing::debug!(chunks = chunks.len(), "Inserting chunks into lexical index");
 
         let fields = LexicalFields::new(self.index.schema())?;
         let mut writer = self
@@ -100,6 +107,12 @@ impl LexicalIndex {
         self.reader
             .reload()
             .context("failed to reload lexical index reader")?;
+
+        tracing::info!(
+            chunks = chunks.len(),
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "Lexical index insert completed"
+        );
         Ok(())
     }
 
@@ -107,7 +120,9 @@ impl LexicalIndex {
         if relative_paths.is_empty() {
             return Ok(());
         }
+        debug!(path_count = relative_paths.len(), "deleting paths from lexical index");
 
+        tracing::debug!(paths = relative_paths.len(), "Deleting paths from lexical index");
         let fields = LexicalFields::new(self.index.schema())?;
         let mut writer = self
             .index
@@ -126,9 +141,13 @@ impl LexicalIndex {
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<HybridHit>> {
+        debug!(query_len = query.len(), limit, "lexical search");
         if limit == 0 {
             return Ok(Vec::new());
         }
+
+        let start = Instant::now();
+        tracing::debug!(query_len = query.len(), limit, "Lexical search starting");
 
         let fields = LexicalFields::new(self.index.schema())?;
         let parsed_query = QueryParser::for_index(&self.index, vec![fields.content])
@@ -138,6 +157,12 @@ impl LexicalIndex {
         let top_docs = searcher
             .search(&parsed_query, &TopDocs::with_limit(limit))
             .context("failed to search lexical index")?;
+
+        tracing::debug!(
+            raw_hits = top_docs.len(),
+            elapsed_us = start.elapsed().as_micros() as u64,
+            "Lexical search query executed"
+        );
 
         top_docs
             .into_iter()
@@ -163,6 +188,7 @@ impl LexicalIndex {
     }
 
     pub fn clear(&self) -> Result<()> {
+        tracing::info!("Clearing lexical index");
         let mut writer = self
             .index
             .writer::<TantivyDocument>(50_000_000)

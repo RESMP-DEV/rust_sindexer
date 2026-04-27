@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::env;
+use tracing::{debug, info};
 
 /// Supported file extensions for indexing (without leading dot).
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
@@ -59,6 +60,10 @@ pub struct Config {
     pub parallelism: usize,
     /// Embedding vector dimension.
     pub embedding_dimension: usize,
+    /// Embedding API RPM limit (0 = unlimited).
+    pub embedding_rpm: u32,
+    /// Embedding API TPM limit (0 = unlimited).
+    pub embedding_tpm: u64,
 }
 
 impl Default for Config {
@@ -72,11 +77,13 @@ impl Default for Config {
             chunk_size: 512,
             chunk_overlap: 64,
             batch_size: 32,
-            concurrency: 16,
+            concurrency: 32,
             max_file_size: 1024 * 1024, // 1 MB
             follow_symlinks: false,
             parallelism: 0,
             embedding_dimension: 384,
+            embedding_rpm: 400,
+            embedding_tpm: 1_600_000,
         }
     }
 }
@@ -86,7 +93,7 @@ impl Config {
     pub fn from_env() -> Self {
         let defaults = Self::default();
 
-        Self {
+        let config = Self {
             embedding_url: env::var("EMBEDDING_URL").unwrap_or(defaults.embedding_url),
             embedding_model: env::var("EMBEDDING_MODEL").unwrap_or(defaults.embedding_model),
             embedding_api_key: env::var("EMBEDDING_API_KEY").ok(),
@@ -124,19 +131,40 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(defaults.embedding_dimension),
-        }
+            embedding_rpm: env::var("EMBEDDING_RPM")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(defaults.embedding_rpm),
+            embedding_tpm: env::var("EMBEDDING_TPM")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(defaults.embedding_tpm),
+        };
+        info!(
+            embedding_url = %config.embedding_url,
+            embedding_model = %config.embedding_model,
+            milvus_url = %config.milvus_url,
+            chunk_size = config.chunk_size,
+            batch_size = config.batch_size,
+            concurrency = config.concurrency,
+            embedding_dimension = config.embedding_dimension,
+            "configuration loaded from environment"
+        );
+        config
     }
 
     /// Get effective thread count for parallel operations.
     #[inline]
     pub fn thread_count(&self) -> usize {
-        if self.parallelism == 0 {
+        let count = if self.parallelism == 0 {
             std::thread::available_parallelism()
                 .map(|p| p.get())
                 .unwrap_or(4)
         } else {
             self.parallelism
-        }
+        };
+        debug!(thread_count = count, "effective parallelism");
+        count
     }
 
     /// Get supported extensions as a HashSet for O(1) lookup.

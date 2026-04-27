@@ -97,7 +97,7 @@ fn test_diff_reports_added_modified_and_deleted_files() {
     create_file(root, "src/added.rs", "pub fn added() {}\n");
 
     let new_files = collect_files(root);
-    let diff =
+    let (diff, _fingerprints) =
         diff_manifest_against_files(&previous, root, "collection", &inputs, &new_files).unwrap();
 
     assert_eq!(diff.added, vec!["src/added.rs"]);

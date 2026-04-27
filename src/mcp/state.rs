@@ -6,6 +6,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use dashmap::DashMap;
 
+use tracing::{debug, info, warn};
+
 use crate::config::Config;
 use crate::embedding::{Embedder, EmbeddingClient, EmbeddingConfig};
 use crate::mcp::manifest::ManifestStore;
@@ -50,6 +52,7 @@ pub struct ContextState {
 
 impl ContextState {
     pub fn new(config: Config) -> Self {
+        info!("initializing context state");
         let embedding_explicitly_set = std::env::var("EMBEDDING_URL")
             .map(|v| !v.is_empty())
             .unwrap_or(false);
@@ -58,15 +61,20 @@ impl ContextState {
             .unwrap_or(false);
 
         let embedder = if embedding_explicitly_set {
+            info!("embedding enabled via EMBEDDING_URL");
             let embedding_config = EmbeddingConfig::from_config(&config);
-            Embedder::Http(EmbeddingClient::new(embedding_config))
+            let rate_limiter = crate::embedding::RateLimiter::new(config.embedding_rpm, config.embedding_tpm);
+            Embedder::Http(EmbeddingClient::with_rate_limiter(embedding_config, rate_limiter))
         } else {
+            info!("embedding disabled (EMBEDDING_URL not set)");
             Embedder::Disabled
         };
 
         let vector_store = if milvus_explicitly_set {
+            info!(milvus_url = %config.milvus_url, "using Milvus vector store");
             VectorStore::Milvus(MilvusClient::new(&config.milvus_url, config.milvus_token.clone()))
         } else {
+            info!("using local vector store");
             VectorStore::Local(LocalStore::new())
         };
 
@@ -127,6 +135,7 @@ impl ContextState {
     }
 
     pub fn start_indexing(&self, path: &Path, total_files: usize) {
+        info!(path = %path.display(), total_files, "starting indexing");
         self.set_status(
             path.to_path_buf(),
             IndexStatus {
@@ -151,6 +160,7 @@ impl ContextState {
     }
 
     pub fn complete_indexing(&self, path: &Path, total_chunks: usize) {
+        info!(path = %path.display(), total_chunks, "indexing completed");
         if let Some(mut status) = self.indexing_status.get_mut(&path.to_path_buf()) {
             status.processed_files = status.total_files;
             status.total_chunks = total_chunks;
@@ -162,6 +172,7 @@ impl ContextState {
     }
 
     pub fn fail_indexing(&self, path: &Path) {
+        warn!(path = %path.display(), "indexing failed");
         if let Some(mut status) = self.indexing_status.get_mut(&path.to_path_buf()) {
             status.status = IndexState::Failed;
             let snapshot = status.clone();
@@ -191,6 +202,7 @@ impl ContextState {
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchResult>> {
+        debug!(collection, query_len = query.len(), limit, "searching");
         let query_embedding = self.embed(query).await?;
         let hits = self
             .vector_store
@@ -246,6 +258,7 @@ impl ContextState {
     }
 
     pub async fn ensure_collection(&self, path: &Path) -> Result<String> {
+        debug!(path = %path.display(), "ensuring collection exists");
         let collection_name = crate::vectordb::collection_name_from_path(path);
 
         if !self.vector_store.has_collection(&collection_name).await? {
@@ -259,6 +272,7 @@ impl ContextState {
     }
 
     pub async fn delete_collection(&self, path: &Path) -> Result<()> {
+        info!(path = %path.display(), "deleting collection");
         let collection_name = crate::vectordb::collection_name_from_path(path);
         self.vector_store.drop_collection(&collection_name).await
     }

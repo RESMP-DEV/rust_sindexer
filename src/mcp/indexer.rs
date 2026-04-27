@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 use tokio::task;
 use tracing::{debug, info, instrument, warn};
 
-use super::manifest::{diff_manifest_against_files, IndexInputs, ManifestStore};
+use super::manifest::{diff_manifest_against_files, FileFingerprint, IndexInputs, ManifestStore};
 use crate::embedding::Embedder;
 use crate::lexical::LexicalIndex;
 use crate::splitter::CodeSplitter;
@@ -148,23 +148,26 @@ pub async fn index_codebase(
     let mut full_reindex = force;
     let mut files_to_index = files.clone();
     let mut stale_relative_paths = Vec::new();
+    let mut cached_fingerprints: Option<Vec<FileFingerprint>> = None;
 
     if !force {
         match previous_manifest.as_ref() {
             Some(previous) if previous.matches_index_inputs(&collection_name, &index_inputs) => {
-                let diff = match diff_manifest_against_files(
+                let (diff, fingerprints) = match diff_manifest_against_files(
                     previous,
                     path,
                     &collection_name,
                     &index_inputs,
                     &files,
                 ) {
-                    Ok(diff) => diff,
+                    Ok(result) => result,
                     Err(e) => {
                         update_status_failed(state, path).await;
                         return Err(e).context("Failed to diff index manifest");
                     }
                 };
+
+                cached_fingerprints = Some(fingerprints);
 
                 if diff.is_empty() {
                     update_status_completed(state, path, 0).await;
@@ -235,11 +238,7 @@ pub async fn index_codebase(
     }
 
     if files_to_index.is_empty() {
-        if let Err(e) =
-            state
-                .manifest_store
-                .write_for_files(path, &collection_name, &index_inputs, &files)
-        {
+        if let Err(e) = write_manifest(state, path, &collection_name, &index_inputs, &files, cached_fingerprints.take()) {
             update_status_failed(state, path).await;
             return Err(e).context("Failed to write index manifest");
         }
@@ -311,49 +310,20 @@ pub async fn index_codebase(
         let _ = state.manifest_store.write_status(path, &status);
     }
 
-    // Populate lexical index
+    // Phase 3: Lexical index + embedding pipeline run concurrently
     let lexical_chunks = all_chunks.clone();
     let lexical_path = path.to_path_buf();
-    if let Err(e) = task::spawn_blocking(move || -> Result<()> {
+    let lexical_handle = task::spawn_blocking(move || -> Result<()> {
         let lexical_index = LexicalIndex::create(&lexical_path)?;
         lexical_index.insert_chunks(&lexical_chunks)?;
         Ok(())
-    })
-    .await
-    .context("Lexical index task panicked")
-    .and_then(|result| result)
-    {
-        update_status_failed(state, path).await;
-        return Err(e).context("Failed to update lexical index");
-    }
+    });
 
-    if total_chunks == 0 {
-        if let Err(e) =
-            state
-                .manifest_store
-                .write_for_files(path, &collection_name, &index_inputs, &files)
-        {
-            update_status_failed(state, path).await;
-            return Err(e).context("Failed to write index manifest");
+    let embedding_handle = async {
+        if total_chunks == 0 || !embeddings_enabled {
+            return Ok((0usize, 0usize));
         }
 
-        update_status_completed(state, path, 0).await;
-        return Ok(IndexResult {
-            files_processed: files_to_index.len(),
-            chunks_created: 0,
-            embeddings_generated: 0,
-            vectors_inserted: 0,
-            duration_ms: start.elapsed().as_millis() as u64,
-            warnings,
-            lexical_only: !embeddings_enabled,
-        });
-    }
-
-    // Phase 3/4: Embed + insert (skipped when embeddings are disabled)
-    let mut embeddings_generated = 0usize;
-    let mut vectors_inserted = 0usize;
-
-    if embeddings_enabled {
         let embedder = state.embedder.clone();
         let vector_store = state.vector_store.clone();
 
@@ -367,6 +337,8 @@ pub async fn index_codebase(
         let semaphore = Arc::new(tokio::sync::Semaphore::new(state.concurrency));
         let mut batch_handles = FuturesUnordered::new();
         let mut batch_failures = Vec::new();
+        let mut embeddings_generated = 0usize;
+        let mut vectors_inserted = 0usize;
 
         for batch in chunk_batches {
             let batch_chunks: Vec<CodeChunk> = batch.to_vec();
@@ -433,7 +405,6 @@ pub async fn index_codebase(
         }
 
         if !batch_failures.is_empty() {
-            update_status_failed(state, path).await;
             anyhow::bail!(
                 "Streaming index failed after inserting {} vectors: {}",
                 vectors_inserted,
@@ -442,12 +413,10 @@ pub async fn index_codebase(
         }
 
         if embeddings_generated == 0 {
-            update_status_failed(state, path).await;
             anyhow::bail!("Failed to generate any embeddings");
         }
 
         if vectors_inserted == 0 {
-            update_status_failed(state, path).await;
             anyhow::bail!(
                 "Generated {} chunks and {} embeddings, but inserted 0 vectors{}",
                 total_chunks,
@@ -459,13 +428,29 @@ pub async fn index_codebase(
                 }
             );
         }
+
+        Ok((embeddings_generated, vectors_inserted))
+    };
+
+    let (lexical_result, embedding_result) = tokio::join!(lexical_handle, embedding_handle);
+
+    if let Err(e) = lexical_result
+        .context("Lexical index task panicked")
+        .and_then(|r| r)
+    {
+        update_status_failed(state, path).await;
+        return Err(e).context("Failed to update lexical index");
     }
 
-    if let Err(e) =
-        state
-            .manifest_store
-            .write_for_files(path, &collection_name, &index_inputs, &files)
-    {
+    let (embeddings_generated, vectors_inserted) = match embedding_result {
+        Ok(counts) => counts,
+        Err(e) => {
+            update_status_failed(state, path).await;
+            return Err(e);
+        }
+    };
+
+    if let Err(e) = write_manifest(state, path, &collection_name, &index_inputs, &files, cached_fingerprints.take()) {
         update_status_failed(state, path).await;
         return Err(e).context("Failed to write index manifest");
     }
@@ -542,6 +527,20 @@ async fn prepare_lexical_index(
         lexical_index.delete_by_paths(stale_relative_paths)?;
     }
     Ok(())
+}
+
+fn write_manifest(
+    state: &IndexerState,
+    path: &Path,
+    collection_name: &str,
+    index_inputs: &IndexInputs,
+    files: &[std::path::PathBuf],
+    cached_fingerprints: Option<Vec<FileFingerprint>>,
+) -> Result<()> {
+    match cached_fingerprints {
+        Some(fp) => state.manifest_store.write_with_fingerprints(path, collection_name, index_inputs, fp),
+        None => state.manifest_store.write_for_files(path, collection_name, index_inputs, files),
+    }
 }
 
 fn relative_path(root: &Path, file_path: &Path) -> String {

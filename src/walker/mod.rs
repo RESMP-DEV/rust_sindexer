@@ -1,8 +1,10 @@
 //! File walker for discovering code files in a codebase.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::Result;
+use tracing::{debug, info, instrument};
 
 use crate::config::{DEFAULT_IGNORE_PATTERNS, EXTENSIONLESS_FILES, SUPPORTED_EXTENSIONS};
 
@@ -28,10 +30,13 @@ impl CodeWalker {
     /// Walk the codebase at the given path and return all indexable files.
     ///
     /// This runs in parallel using the ignore crate's parallel walker.
+    #[instrument(skip(self), fields(path = %path.display()))]
     pub async fn walk(&self, path: &Path) -> Result<Vec<PathBuf>> {
         use ignore::WalkBuilder;
         use std::sync::Mutex;
 
+        let start = Instant::now();
+        debug!(extensions = self.extensions.len(), ignore_patterns = self.ignore_patterns.len(), "Starting file walk");
         let files = std::sync::Arc::new(Mutex::new(Vec::new()));
         let extensions = self.extensions.clone();
         let mut builder = WalkBuilder::new(path);
@@ -85,6 +90,11 @@ impl CodeWalker {
             .map_err(|e| anyhow::anyhow!("Failed to get mutex: {}", e))?
             .clone();
 
+        info!(
+            files_found = result.len(),
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "File walk completed"
+        );
         Ok(result)
     }
 }

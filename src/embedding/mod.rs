@@ -1,10 +1,102 @@
+use std::sync::Arc;
+use std::time::Instant;
+
 use anyhow::{Context, Result};
+use parking_lot::Mutex;
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, HeaderMap};
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info};
 
 use crate::config::Config;
 use crate::types::EmbeddingVector;
+
+/// Token-bucket rate limiter for RPM and TPM limits.
+struct TokenBucket {
+    capacity: f64,
+    tokens: f64,
+    refill_rate: f64, // tokens per second
+    last_refill: Instant,
+}
+
+impl TokenBucket {
+    fn new(per_minute: f64) -> Self {
+        let refill_rate = per_minute / 60.0;
+        Self {
+            capacity: per_minute,
+            tokens: per_minute,
+            refill_rate,
+            last_refill: Instant::now(),
+        }
+    }
+
+    fn refill(&mut self) {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * self.refill_rate).min(self.capacity);
+        self.last_refill = now;
+    }
+
+    fn try_acquire(&mut self, cost: f64) -> Option<std::time::Duration> {
+        self.refill();
+        if self.tokens >= cost {
+            self.tokens -= cost;
+            None
+        } else {
+            let deficit = cost - self.tokens;
+            Some(std::time::Duration::from_secs_f64(deficit / self.refill_rate))
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct RateLimiter {
+    rpm: Arc<Mutex<TokenBucket>>,
+    tpm: Arc<Mutex<TokenBucket>>,
+}
+
+impl RateLimiter {
+    pub fn new(rpm_limit: u32, tpm_limit: u64) -> Self {
+        Self {
+            rpm: Arc::new(Mutex::new(TokenBucket::new(rpm_limit as f64))),
+            tpm: Arc::new(Mutex::new(TokenBucket::new(tpm_limit as f64))),
+        }
+    }
+
+    pub fn unlimited() -> Self {
+        Self::new(100_000, 1_000_000_000)
+    }
+
+    pub async fn acquire(&self, estimated_tokens: u64) {
+        loop {
+            let wait = {
+                let rpm_wait = self.rpm.lock().try_acquire(1.0);
+                let tpm_wait = self.tpm.lock().try_acquire(estimated_tokens as f64);
+                match (rpm_wait, tpm_wait) {
+                    (None, None) => break,
+                    (Some(a), Some(b)) => a.max(b),
+                    (Some(a), None) | (None, Some(a)) => a,
+                }
+            };
+            debug!("Rate limiter: sleeping {}ms", wait.as_millis());
+            tokio::time::sleep(wait).await;
+        }
+    }
+
+    /// Drain buckets on 429/5xx to force all concurrent requests to back off.
+    pub fn penalize(&self, retry_after_secs: f64) {
+        {
+            let mut rpm = self.rpm.lock();
+            let drain = retry_after_secs * rpm.refill_rate;
+            rpm.tokens = (rpm.tokens - drain).max(0.0);
+        }
+        {
+            let mut tpm = self.tpm.lock();
+            let drain = retry_after_secs * tpm.refill_rate;
+            tpm.tokens = (tpm.tokens - drain).max(0.0);
+        }
+    }
+}
 
 /// Configuration for the embedding client.
 #[derive(Clone, Debug)]
@@ -72,11 +164,16 @@ struct EmbeddingResponse {
 pub struct EmbeddingClient {
     client: Client,
     config: EmbeddingConfig,
+    rate_limiter: RateLimiter,
 }
 
 impl EmbeddingClient {
     /// Creates a new embedding client with the given configuration.
     pub fn new(config: EmbeddingConfig) -> Self {
+        Self::with_rate_limiter(config, RateLimiter::unlimited())
+    }
+
+    pub fn with_rate_limiter(config: EmbeddingConfig, rate_limiter: RateLimiter) -> Self {
         let mut headers = HeaderMap::new();
         if let Some(ref key) = config.api_key {
             headers.insert(
@@ -89,13 +186,13 @@ impl EmbeddingClient {
 
         let client = Client::builder()
             .default_headers(headers)
-            .pool_max_idle_per_host(32)
+            .pool_max_idle_per_host(64)
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(120))
             .build()
             .expect("failed to build HTTP client");
 
-        Self { client, config }
+        Self { client, config, rate_limiter }
     }
 
     /// Creates a new embedding client with default configuration.
@@ -119,26 +216,51 @@ impl EmbeddingClient {
             return Ok(Vec::new());
         }
 
+        let start = std::time::Instant::now();
+        let total_texts = texts.len();
+        let num_batches = (total_texts + self.config.batch_size - 1) / self.config.batch_size;
+        debug!(
+            texts = total_texts,
+            batches = num_batches,
+            batch_size = self.config.batch_size,
+            model = %self.config.model,
+            "Embedding batch starting"
+        );
+
         let mut all_embeddings = Vec::with_capacity(texts.len());
 
-        for chunk in texts.chunks(self.config.batch_size) {
+        for (i, chunk) in texts.chunks(self.config.batch_size).enumerate() {
+            let chunk_start = std::time::Instant::now();
             let embeddings = self.embed_chunk(chunk).await?;
+            debug!(
+                batch = i + 1,
+                batch_texts = chunk.len(),
+                elapsed_ms = chunk_start.elapsed().as_millis() as u64,
+                "Embedding batch chunk completed"
+            );
             all_embeddings.extend(embeddings);
         }
 
+        info!(
+            texts = total_texts,
+            embeddings = all_embeddings.len(),
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "Embedding batch completed"
+        );
         Ok(all_embeddings)
     }
 
     /// Embeds a single chunk of texts (up to batch_size) with retry + backoff.
     async fn embed_chunk(&self, texts: &[String]) -> Result<Vec<EmbeddingVector>> {
-        const MAX_RETRIES: u32 = 3;
+        const MAX_RETRIES: u32 = 5;
+        const BYTES_PER_TOKEN: u64 = 4;
+        const BASE_BACKOFF_MS: u64 = 1000;
+
+        let estimated_tokens: u64 = texts.iter().map(|t| t.len() as u64 / BYTES_PER_TOKEN).sum();
 
         let mut last_err = None;
         for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
-                let backoff = std::time::Duration::from_millis(500 * 2u64.pow(attempt - 1));
-                tokio::time::sleep(backoff).await;
-            }
+            self.rate_limiter.acquire(estimated_tokens).await;
 
             let request = EmbeddingRequest {
                 input: texts,
@@ -148,7 +270,10 @@ impl EmbeddingClient {
             let response = match self.client.post(&self.config.url).json(&request).send().await {
                 Ok(r) => r,
                 Err(e) => {
+                    let backoff_secs = (BASE_BACKOFF_MS * 2u64.pow(attempt)) as f64 / 1000.0;
+                    self.rate_limiter.penalize(backoff_secs);
                     last_err = Some(format!("request failed: {e}"));
+                    tokio::time::sleep(std::time::Duration::from_secs_f64(backoff_secs)).await;
                     continue;
                 }
             };
@@ -157,8 +282,23 @@ impl EmbeddingClient {
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS
                 || status.is_server_error()
             {
+                let retry_after = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<f64>().ok());
+
+                let backoff_secs = retry_after
+                    .unwrap_or((BASE_BACKOFF_MS * 2u64.pow(attempt)) as f64 / 1000.0);
+
+                self.rate_limiter.penalize(backoff_secs);
                 let body = response.text().await.unwrap_or_default();
+                tracing::warn!(
+                    "Embedding API {status} (attempt {}/{MAX_RETRIES}), backing off {backoff_secs:.1}s: {body}",
+                    attempt + 1,
+                );
                 last_err = Some(format!("embedding API returned {status}: {body}"));
+                tokio::time::sleep(std::time::Duration::from_secs_f64(backoff_secs)).await;
                 continue;
             }
 

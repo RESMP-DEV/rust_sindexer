@@ -20,6 +20,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::task;
 use tokio::time::{sleep, Duration};
+use tracing::{debug, info};
 
 use super::indexer::{self, IndexerState};
 use super::hybrid::{fuse_hybrid_hits, HybridFusionOptions, HybridHit};
@@ -74,7 +75,8 @@ fn create_indexer_state(state: &SharedState, root_path: &Path) -> Arc<IndexerSta
     });
 
     let embedder = if state.embedder.is_enabled() {
-        Embedder::Http(EmbeddingClient::new(EmbeddingConfig::from_config(config)))
+        let rate_limiter = crate::embedding::RateLimiter::new(config.embedding_rpm, config.embedding_tpm);
+        Embedder::Http(EmbeddingClient::with_rate_limiter(EmbeddingConfig::from_config(config), rate_limiter))
     } else {
         Embedder::Disabled
     };
@@ -266,6 +268,11 @@ impl CodebaseTools {
         }
     }
 
+    /// Create from an existing Sindexer instance, sharing its state.
+    pub fn from_sindexer(sindexer: &crate::api::Sindexer) -> Self {
+        Self::with_state(sindexer.shared_state().clone())
+    }
+
     /// Get the tool router for this handler.
     pub fn router(&self) -> &ToolRouter<Self> {
         &self.tool_router
@@ -368,6 +375,7 @@ impl CodebaseTools {
         params: Parameters<IndexCodebaseParams>,
     ) -> Result<Json<IndexResult>, McpError> {
         let params = params.0;
+        info!(path = %params.path, force = params.force, "index_codebase called");
         let path = validate_directory_path(&params.path)?;
 
         if self.state.is_indexing(&path) && !params.force {
@@ -400,6 +408,12 @@ impl CodebaseTools {
         } else {
             ""
         };
+        info!(
+            path = %params.path,
+            files_indexed = result.files_processed,
+            chunks_created = result.chunks_created,
+            "index_codebase completed"
+        );
         Ok(Json(IndexResult {
             success: true,
             message: if result.warnings.is_empty() {
@@ -427,6 +441,7 @@ impl CodebaseTools {
         params: Parameters<SearchCodeParams>,
     ) -> Result<Json<SearchResults>, McpError> {
         let params = params.0;
+        info!(path = %params.path, query = %params.query, limit = params.limit, "search_code called");
         let path = validate_directory_path(&params.path)?;
 
         // Validate limit
@@ -495,6 +510,7 @@ impl CodebaseTools {
             })
             .collect::<Vec<_>>();
 
+        info!(result_count = results.len(), "search_code completed");
         Ok(Json(SearchResults {
             count: results.len(),
             results,
@@ -512,6 +528,7 @@ impl CodebaseTools {
         params: Parameters<GetIndexingStatusParams>,
     ) -> Result<Json<IndexStatus>, McpError> {
         let params = params.0;
+        debug!(path = %params.path, "get_indexing_status called");
         let path = validate_absolute_path(&params.path)?;
 
         // Validate path
@@ -537,6 +554,7 @@ impl CodebaseTools {
         params: Parameters<ClearIndexParams>,
     ) -> Result<Json<ClearResult>, McpError> {
         let params = params.0;
+        info!(path = %params.path, "clear_index called");
         let path = validate_absolute_path(&params.path)?;
 
         let collection_name = collection_name_from_path(&path);
@@ -596,6 +614,7 @@ impl CodebaseTools {
         &self,
         _params: Parameters<ListCollectionsParams>,
     ) -> Result<Json<ListCollectionsResult>, McpError> {
+        debug!("list_collections called");
         let names = self
             .state
             .vector_store
@@ -632,6 +651,7 @@ impl CodebaseTools {
         params: Parameters<CollectionStatsParams>,
     ) -> Result<Json<CollectionStatsResult>, McpError> {
         let params = params.0;
+        debug!(collection = %params.collection_name, "collection_stats called");
         let stats = self
             .state
             .vector_store
@@ -657,6 +677,7 @@ impl CodebaseTools {
         params: Parameters<DropCollectionParams>,
     ) -> Result<Json<DropCollectionResult>, McpError> {
         let params = params.0;
+        info!(collection = %params.collection_name, "drop_collection called");
         let exists = self
             .state
             .vector_store

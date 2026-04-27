@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracing::{debug, info, warn};
 
 /// A document to be inserted into Milvus.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -231,6 +232,8 @@ impl MilvusClient {
     /// - `vector` for embeddings (FLOAT_VECTOR)
     /// - `metadata` for additional data (JSON)
     pub async fn create_collection(&self, name: &str, dimension: usize) -> Result<()> {
+        info!(collection = name, dimension, endpoint = %self.base_url, "Creating Milvus collection");
+        let start = std::time::Instant::now();
         let url = format!("{}/v2/vectordb/collections/create", self.base_url);
 
         let request = CreateCollectionRequest {
@@ -254,14 +257,12 @@ impl MilvusClient {
             .context("failed to parse create collection response")?;
 
         if response.code != 0 {
-            anyhow::bail!(
-                "create collection failed: {}",
-                response
-                    .message
-                    .unwrap_or_else(|| "unknown error".to_string())
-            );
+            let msg = response.message.unwrap_or_else(|| "unknown error".to_string());
+            warn!(collection = name, code = response.code, error = %msg, "Create collection failed");
+            anyhow::bail!("create collection failed: {}", msg);
         }
 
+        debug!(collection = name, elapsed_ms = start.elapsed().as_millis() as u64, "Milvus collection created");
         Ok(())
     }
 
@@ -356,6 +357,8 @@ impl MilvusClient {
         vector: &[f32],
         top_k: usize,
     ) -> Result<Vec<SearchHit>> {
+        debug!(collection, top_k, vector_dim = vector.len(), "Milvus search starting");
+        let start = std::time::Instant::now();
         let url = format!("{}/v2/vectordb/entities/search", self.base_url);
 
         let request = SearchRequest {
@@ -383,15 +386,12 @@ impl MilvusClient {
             .context("failed to parse search response")?;
 
         if response.code != 0 {
-            anyhow::bail!(
-                "search failed: {}",
-                response
-                    .message
-                    .unwrap_or_else(|| "unknown error".to_string())
-            );
+            let msg = response.message.unwrap_or_else(|| "unknown error".to_string());
+            warn!(collection, code = response.code, error = %msg, "Milvus search failed");
+            anyhow::bail!("search failed: {}", msg);
         }
 
-        let hits = response
+        let hits: Vec<SearchHit> = response
             .data
             .map(SearchResultsData::into_hits)
             .unwrap_or_default()
@@ -404,6 +404,12 @@ impl MilvusClient {
             })
             .collect();
 
+        debug!(
+            collection,
+            results = hits.len(),
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "Milvus search completed"
+        );
         Ok(hits)
     }
 
@@ -413,6 +419,8 @@ impl MilvusClient {
     /// * `collection` - Collection name
     /// * `filter` - Filter expression (e.g., `id in ["id1", "id2"]`)
     pub async fn delete(&self, collection: &str, filter: &str) -> Result<()> {
+        debug!(collection, filter_len = filter.len(), "Milvus delete starting");
+        let start = std::time::Instant::now();
         let url = format!("{}/v2/vectordb/entities/delete", self.base_url);
 
         let request = DeleteRequest {
@@ -433,14 +441,12 @@ impl MilvusClient {
             .context("failed to parse delete response")?;
 
         if response.code != 0 {
-            anyhow::bail!(
-                "delete failed: {}",
-                response
-                    .message
-                    .unwrap_or_else(|| "unknown error".to_string())
-            );
+            let msg = response.message.unwrap_or_else(|| "unknown error".to_string());
+            warn!(collection, code = response.code, error = %msg, "Milvus delete failed");
+            anyhow::bail!("delete failed: {}", msg);
         }
 
+        debug!(collection, elapsed_ms = start.elapsed().as_millis() as u64, "Milvus delete completed");
         Ok(())
     }
 
@@ -454,6 +460,9 @@ impl MilvusClient {
             return Ok(());
         }
 
+        let batch_size = data.len();
+        debug!(collection, rows = batch_size, "Milvus insert_batch starting");
+        let start = std::time::Instant::now();
         const MAX_RETRIES: u32 = 3;
         let url = format!("{}/v2/vectordb/entities/insert", self.base_url);
 
@@ -482,6 +491,7 @@ impl MilvusClient {
             {
                 Ok(r) => r,
                 Err(e) => {
+                    warn!(collection, attempt, error = %e, "Milvus insert_batch request failed");
                     last_err = Some(format!("request failed: {e}"));
                     continue;
                 }
@@ -490,6 +500,7 @@ impl MilvusClient {
             let status = response.status();
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
                 let body = response.text().await.unwrap_or_default();
+                warn!(collection, attempt, status = %status, "Milvus insert_batch retryable error");
                 last_err = Some(format!("Milvus returned {status}: {body}"));
                 continue;
             }
@@ -500,21 +511,26 @@ impl MilvusClient {
                 .context("failed to parse insert batch response")?;
 
             if response.code != 0 {
-                anyhow::bail!(
-                    "insert batch failed: {}",
-                    response
-                        .message
-                        .unwrap_or_else(|| "unknown error".to_string())
-                );
+                let msg = response.message.unwrap_or_else(|| "unknown error".to_string());
+                warn!(collection, code = response.code, error = %msg, "Milvus insert_batch rejected");
+                anyhow::bail!("insert batch failed: {}", msg);
             }
 
+            debug!(
+                collection,
+                rows = batch_size,
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                "Milvus insert_batch completed"
+            );
             return Ok(());
         }
 
+        let err_msg = last_err.unwrap_or_else(|| "unknown error".to_string());
+        warn!(collection, retries = MAX_RETRIES, error = %err_msg, "Milvus insert_batch exhausted retries");
         anyhow::bail!(
             "insert batch failed after {} retries: {}",
             MAX_RETRIES,
-            last_err.unwrap_or_else(|| "unknown error".to_string())
+            err_msg
         )
     }
 
@@ -589,6 +605,7 @@ impl MilvusClient {
     /// # Arguments
     /// * `name` - Collection name to drop
     pub async fn drop_collection(&self, name: &str) -> Result<()> {
+        info!(collection = name, "Dropping Milvus collection");
         let url = format!("{}/v2/vectordb/collections/drop", self.base_url);
 
         let request = DropCollectionRequest {
