@@ -39,7 +39,7 @@ impl VectorStore {
         }
     }
 
-    pub async fn insert_batch(&self, collection: &str, data: &[InsertRow]) -> Result<()> {
+    pub async fn insert_batch(&self, collection: &str, data: &[InsertRow]) -> Result<usize> {
         debug!(collection, batch_size = data.len(), "inserting batch");
         match self {
             Self::Local(store) => {
@@ -52,7 +52,9 @@ impl VectorStore {
                         metadata: row.metadata.clone(),
                     })
                     .collect();
-                store.insert_docs(collection, docs)
+                let inserted = docs.len();
+                store.insert_docs(collection, docs)?;
+                Ok(inserted)
             }
             Self::Milvus(client) => client.insert_batch(collection, data).await,
         }
@@ -95,7 +97,11 @@ impl VectorStore {
         if relative_paths.is_empty() {
             return Ok(());
         }
-        debug!(collection, path_count = relative_paths.len(), "deleting by relative paths");
+        debug!(
+            collection,
+            path_count = relative_paths.len(),
+            "deleting by relative paths"
+        );
         match self {
             Self::Local(store) => store.delete_by_filter(collection, relative_paths),
             Self::Milvus(client) => {

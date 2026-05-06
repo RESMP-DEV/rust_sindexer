@@ -46,6 +46,8 @@ fn default_inputs() -> IndexInputs {
         target_chunk_lines: 50,
         extensions: vec!["rs".into()],
         ignore_patterns: vec!["target".into()],
+        max_file_size: 1024 * 1024,
+        follow_symlinks: false,
     }
 }
 

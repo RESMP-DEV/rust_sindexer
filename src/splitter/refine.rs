@@ -48,17 +48,18 @@ fn split_chunk(chunk: &CodeChunk, max_size: usize, overlap: usize) -> Vec<CodeCh
         let (end_idx, content) = find_split_point(&lines, start_idx, max_size);
 
         if content.is_empty() {
-            // Single line exceeds max_size; include it anyway to avoid infinite loop
             let line = lines[start_idx];
-            let piece = create_piece(
-                chunk,
-                line.to_string(),
-                chunk.start_line + start_idx as u32,
-                chunk.start_line + start_idx as u32,
-                piece_num,
-            );
-            pieces.push(piece);
-            piece_num += 1;
+            for line_piece in split_long_line(line, max_size) {
+                let piece = create_piece(
+                    chunk,
+                    line_piece,
+                    chunk.start_line + start_idx as u32,
+                    chunk.start_line + start_idx as u32,
+                    piece_num,
+                );
+                pieces.push(piece);
+                piece_num += 1;
+            }
             start_idx += 1;
         } else {
             let piece_start_line = chunk.start_line + start_idx as u32;
@@ -109,8 +110,11 @@ fn find_split_point(lines: &[&str], start_idx: usize, max_size: usize) -> (usize
             format!("\n{}", line)
         };
 
-        if accumulated.len() + line_with_newline.len() > max_size && !accumulated.is_empty() {
-            // Adding this line would exceed max_size; stop here
+        if accumulated.is_empty() && line_with_newline.len() > max_size {
+            break;
+        }
+
+        if accumulated.len() + line_with_newline.len() > max_size {
             break;
         }
 
@@ -124,6 +128,30 @@ fn find_split_point(lines: &[&str], start_idx: usize, max_size: usize) -> (usize
     }
 
     (end_idx, accumulated)
+}
+
+fn split_long_line(line: &str, max_size: usize) -> Vec<String> {
+    let max_size = max_size.max(1);
+    let mut pieces = Vec::new();
+    let mut start = 0;
+
+    while start < line.len() {
+        let mut end = (start + max_size).min(line.len());
+        while end > start && !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start {
+            end = line[start..]
+                .char_indices()
+                .nth(1)
+                .map(|(idx, _)| start + idx)
+                .unwrap_or(line.len());
+        }
+        pieces.push(line[start..end].to_string());
+        start = end;
+    }
+
+    pieces
 }
 
 /// Creates a new CodeChunk piece from a parent chunk.
@@ -224,13 +252,36 @@ mod tests {
 
     #[test]
     fn test_single_long_line() {
-        // A single line that exceeds max_size should still be included
         let long_line = "a".repeat(200);
         let chunk = make_chunk(&long_line, 1);
         let result = refine_chunks(vec![chunk], 50, 2);
-        assert!(!result.is_empty());
-        // The long line should be preserved even though it exceeds max_size
-        assert!(result.iter().any(|c| c.content.len() >= 50));
+        assert_eq!(result.len(), 4);
+        assert!(result.iter().all(|c| c.content.len() <= 50));
+        assert!(result.iter().all(|c| c.start_line == 1 && c.end_line == 1));
+        assert_eq!(
+            result
+                .iter()
+                .map(|chunk| chunk.content.as_str())
+                .collect::<String>(),
+            long_line
+        );
+    }
+
+    #[test]
+    fn test_single_long_line_respects_utf8_boundaries() {
+        let long_line = "λ".repeat(20);
+        let chunk = make_chunk(&long_line, 1);
+        let result = refine_chunks(vec![chunk], 7, 0);
+
+        assert!(result.len() > 1);
+        assert!(result.iter().all(|c| c.content.len() <= 7));
+        assert_eq!(
+            result
+                .iter()
+                .map(|chunk| chunk.content.as_str())
+                .collect::<String>(),
+            long_line
+        );
     }
 
     #[test]

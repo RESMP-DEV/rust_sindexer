@@ -146,6 +146,19 @@ struct MilvusResponse {
     message: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct InsertResponse {
+    code: i32,
+    data: Option<InsertResponseData>,
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct InsertResponseData {
+    #[serde(rename = "insertCount", default)]
+    insert_count: usize,
+}
+
 #[derive(Serialize)]
 struct DropCollectionRequest {
     #[serde(rename = "dbName")]
@@ -257,12 +270,18 @@ impl MilvusClient {
             .context("failed to parse create collection response")?;
 
         if response.code != 0 {
-            let msg = response.message.unwrap_or_else(|| "unknown error".to_string());
+            let msg = response
+                .message
+                .unwrap_or_else(|| "unknown error".to_string());
             warn!(collection = name, code = response.code, error = %msg, "Create collection failed");
             anyhow::bail!("create collection failed: {}", msg);
         }
 
-        debug!(collection = name, elapsed_ms = start.elapsed().as_millis() as u64, "Milvus collection created");
+        debug!(
+            collection = name,
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "Milvus collection created"
+        );
         Ok(())
     }
 
@@ -357,7 +376,12 @@ impl MilvusClient {
         vector: &[f32],
         top_k: usize,
     ) -> Result<Vec<SearchHit>> {
-        debug!(collection, top_k, vector_dim = vector.len(), "Milvus search starting");
+        debug!(
+            collection,
+            top_k,
+            vector_dim = vector.len(),
+            "Milvus search starting"
+        );
         let start = std::time::Instant::now();
         let url = format!("{}/v2/vectordb/entities/search", self.base_url);
 
@@ -386,7 +410,9 @@ impl MilvusClient {
             .context("failed to parse search response")?;
 
         if response.code != 0 {
-            let msg = response.message.unwrap_or_else(|| "unknown error".to_string());
+            let msg = response
+                .message
+                .unwrap_or_else(|| "unknown error".to_string());
             warn!(collection, code = response.code, error = %msg, "Milvus search failed");
             anyhow::bail!("search failed: {}", msg);
         }
@@ -419,7 +445,11 @@ impl MilvusClient {
     /// * `collection` - Collection name
     /// * `filter` - Filter expression (e.g., `id in ["id1", "id2"]`)
     pub async fn delete(&self, collection: &str, filter: &str) -> Result<()> {
-        debug!(collection, filter_len = filter.len(), "Milvus delete starting");
+        debug!(
+            collection,
+            filter_len = filter.len(),
+            "Milvus delete starting"
+        );
         let start = std::time::Instant::now();
         let url = format!("{}/v2/vectordb/entities/delete", self.base_url);
 
@@ -441,12 +471,18 @@ impl MilvusClient {
             .context("failed to parse delete response")?;
 
         if response.code != 0 {
-            let msg = response.message.unwrap_or_else(|| "unknown error".to_string());
+            let msg = response
+                .message
+                .unwrap_or_else(|| "unknown error".to_string());
             warn!(collection, code = response.code, error = %msg, "Milvus delete failed");
             anyhow::bail!("delete failed: {}", msg);
         }
 
-        debug!(collection, elapsed_ms = start.elapsed().as_millis() as u64, "Milvus delete completed");
+        debug!(
+            collection,
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "Milvus delete completed"
+        );
         Ok(())
     }
 
@@ -455,13 +491,17 @@ impl MilvusClient {
     /// # Arguments
     /// * `collection` - Collection name
     /// * `data` - Rows to insert
-    pub async fn insert_batch(&self, collection: &str, data: &[InsertRow]) -> Result<()> {
+    pub async fn insert_batch(&self, collection: &str, data: &[InsertRow]) -> Result<usize> {
         if data.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
 
         let batch_size = data.len();
-        debug!(collection, rows = batch_size, "Milvus insert_batch starting");
+        debug!(
+            collection,
+            rows = batch_size,
+            "Milvus insert_batch starting"
+        );
         let start = std::time::Instant::now();
         const MAX_RETRIES: u32 = 3;
         let url = format!("{}/v2/vectordb/entities/insert", self.base_url);
@@ -505,13 +545,15 @@ impl MilvusClient {
                 continue;
             }
 
-            let response: MilvusResponse = response
+            let response: InsertResponse = response
                 .json()
                 .await
                 .context("failed to parse insert batch response")?;
 
             if response.code != 0 {
-                let msg = response.message.unwrap_or_else(|| "unknown error".to_string());
+                let msg = response
+                    .message
+                    .unwrap_or_else(|| "unknown error".to_string());
                 warn!(collection, code = response.code, error = %msg, "Milvus insert_batch rejected");
                 anyhow::bail!("insert batch failed: {}", msg);
             }
@@ -519,10 +561,18 @@ impl MilvusClient {
             debug!(
                 collection,
                 rows = batch_size,
+                inserted = response
+                    .data
+                    .as_ref()
+                    .map(|data| data.insert_count)
+                    .unwrap_or(batch_size),
                 elapsed_ms = start.elapsed().as_millis() as u64,
                 "Milvus insert_batch completed"
             );
-            return Ok(());
+            return Ok(response
+                .data
+                .map(|data| data.insert_count)
+                .unwrap_or(batch_size));
         }
 
         let err_msg = last_err.unwrap_or_else(|| "unknown error".to_string());
@@ -594,7 +644,9 @@ impl MilvusClient {
             );
         }
 
-        let data = response.data.unwrap_or(CollectionStatsData { row_count: 0 });
+        let data = response
+            .data
+            .unwrap_or(CollectionStatsData { row_count: 0 });
         Ok(CollectionStats {
             row_count: data.row_count,
         })
@@ -663,7 +715,7 @@ impl SearchResultsData {
 
 #[cfg(test)]
 mod tests {
-    use super::{SearchResponse, milvus_id_for_chunk_id};
+    use super::{milvus_id_for_chunk_id, SearchResponse};
 
     #[test]
     fn milvus_ids_are_stable_positive_i64s() {

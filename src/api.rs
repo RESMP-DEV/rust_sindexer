@@ -51,12 +51,18 @@ pub struct Sindexer {
 
 impl Sindexer {
     pub fn new(config: Config) -> Self {
-        let embedder_mode = if std::env::var("EMBEDDING_URL").map(|v| !v.is_empty()).unwrap_or(false) {
+        let embedder_mode = if std::env::var("EMBEDDING_URL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+        {
             "http"
         } else {
             "disabled"
         };
-        let vector_mode = if std::env::var("MILVUS_URL").map(|v| !v.is_empty()).unwrap_or(false) {
+        let vector_mode = if std::env::var("MILVUS_URL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+        {
             "milvus"
         } else {
             "local"
@@ -85,7 +91,11 @@ impl Sindexer {
             "Sindexer initialized with explicit components"
         );
         Self {
-            state: Arc::new(ContextState::with_components(config, embedder, vector_store)),
+            state: Arc::new(ContextState::with_components(
+                config,
+                embedder,
+                vector_store,
+            )),
         }
     }
 
@@ -147,7 +157,9 @@ impl Sindexer {
                 warnings = r.warnings.len(),
                 "Index operation completed"
             ),
-            Err(e) => error!(error = %e, elapsed_ms = start.elapsed().as_millis() as u64, "Index operation failed"),
+            Err(e) => {
+                error!(error = %e, elapsed_ms = start.elapsed().as_millis() as u64, "Index operation failed")
+            }
         }
 
         let result = result.context("indexing failed")?;
@@ -181,9 +193,7 @@ impl Sindexer {
 
         let semantic_start = Instant::now();
         let vector_hits = if self.state.embedder.is_enabled() {
-            let hits = self.state
-                .search(&collection, query, limit)
-                .await?;
+            let hits = self.state.search(&collection, query, limit).await?;
             debug!(
                 count = hits.len(),
                 elapsed_ms = semantic_start.elapsed().as_millis() as u64,
@@ -323,14 +333,21 @@ impl Sindexer {
 
     pub async fn collection_stats(&self, name: &str) -> Result<u64> {
         let stats = self.state.vector_store.collection_stats(name).await?;
-        debug!(collection = name, row_count = stats.row_count, "Collection stats");
+        debug!(
+            collection = name,
+            row_count = stats.row_count,
+            "Collection stats"
+        );
         Ok(stats.row_count)
     }
 
     #[instrument(skip(self))]
     pub async fn drop_collection(&self, name: &str) -> Result<bool> {
         if !self.state.vector_store.has_collection(name).await? {
-            debug!(collection = name, "Drop requested but collection does not exist");
+            debug!(
+                collection = name,
+                "Drop requested but collection does not exist"
+            );
             return Ok(false);
         }
         self.state.vector_store.drop_collection(name).await?;
@@ -381,7 +398,7 @@ fn create_indexer_state(state: &SharedState, root_path: &Path) -> Arc<IndexerSta
     };
 
     Arc::new(IndexerState::with_concurrency(
-        CodeWalker::new(),
+        CodeWalker::from_config(config),
         splitter,
         embedder,
         vector_store,

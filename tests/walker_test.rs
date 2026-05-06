@@ -3,6 +3,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use ignore::WalkBuilder;
+use sindexer::config::Config;
 use sindexer::walker::CodeWalker;
 use tempfile::TempDir;
 
@@ -279,6 +280,40 @@ async fn test_respects_contextignore_file_patterns() {
     assert_eq!(paths.len(), 1);
     assert!(paths.contains(&src_main));
     assert!(!paths.iter().any(|p| p.ends_with("generated/output.rs")));
+}
+
+#[tokio::test]
+async fn test_code_walker_applies_default_ignore_components() {
+    let temp = TempDir::new().unwrap();
+
+    let src_main = create_file(&temp, "src/main.rs", "fn main() {}");
+    create_file(&temp, "target/debug/generated.rs", "pub fn generated() {}");
+    create_file(&temp, "node_modules/pkg/index.js", "export const x = 1;");
+
+    let walker = CodeWalker::new();
+    let paths = walker.walk(temp.path()).await.unwrap();
+
+    assert_eq!(paths.len(), 1);
+    assert!(paths.contains(&src_main));
+}
+
+#[tokio::test]
+async fn test_code_walker_skips_oversized_files() {
+    let temp = TempDir::new().unwrap();
+
+    let small = create_file(&temp, "small.rs", "fn a() {}");
+    create_file(&temp, "large.rs", &"x".repeat(128));
+
+    let config = Config {
+        max_file_size: 32,
+        ..Config::default()
+    };
+    let walker = CodeWalker::from_config(&config);
+    let paths = walker.walk(temp.path()).await.unwrap();
+
+    assert_eq!(paths.len(), 1);
+    assert!(paths.contains(&small));
+    assert!(!paths.iter().any(|path| path.ends_with("large.rs")));
 }
 
 #[test]

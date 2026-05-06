@@ -63,8 +63,12 @@ impl ContextState {
         let embedder = if embedding_explicitly_set {
             info!("embedding enabled via EMBEDDING_URL");
             let embedding_config = EmbeddingConfig::from_config(&config);
-            let rate_limiter = crate::embedding::RateLimiter::new(config.embedding_rpm, config.embedding_tpm);
-            Embedder::Http(EmbeddingClient::with_rate_limiter(embedding_config, rate_limiter))
+            let rate_limiter =
+                crate::embedding::RateLimiter::new(config.embedding_rpm, config.embedding_tpm);
+            Embedder::Http(EmbeddingClient::with_rate_limiter(
+                embedding_config,
+                rate_limiter,
+            ))
         } else {
             info!("embedding disabled (EMBEDDING_URL not set)");
             Embedder::Disabled
@@ -72,7 +76,10 @@ impl ContextState {
 
         let vector_store = if milvus_explicitly_set {
             info!(milvus_url = %config.milvus_url, "using Milvus vector store");
-            VectorStore::Milvus(MilvusClient::new(&config.milvus_url, config.milvus_token.clone()))
+            VectorStore::Milvus(MilvusClient::new(
+                &config.milvus_url,
+                config.milvus_token.clone(),
+            ))
         } else {
             info!("using local vector store");
             VectorStore::Local(LocalStore::new())
@@ -95,11 +102,7 @@ impl ContextState {
         }
     }
 
-    pub fn with_components(
-        config: Config,
-        embedder: Embedder,
-        vector_store: VectorStore,
-    ) -> Self {
+    pub fn with_components(config: Config, embedder: Embedder, vector_store: VectorStore) -> Self {
         let splitter_config = crate::splitter::Config {
             max_chunk_bytes: config.chunk_size,
             overlap_lines: config.chunk_overlap / 80,
@@ -122,11 +125,22 @@ impl ContextState {
     }
 
     pub fn get_status(&self, path: &Path) -> IndexStatus {
-        self.indexing_status
+        let in_memory = self
+            .indexing_status
             .get(&path.to_path_buf())
-            .map(|r| r.clone())
-            .or_else(|| self.manifest_store.load_status(path).ok().flatten())
-            .unwrap_or_default()
+            .map(|r| r.clone());
+        let persisted = self.manifest_store.load_status(path).ok().flatten();
+
+        match (in_memory, persisted) {
+            (Some(memory), Some(file))
+                if memory.status == IndexState::Idle && file.status != IndexState::Idle =>
+            {
+                file
+            }
+            (Some(memory), _) => memory,
+            (None, Some(file)) => file,
+            (None, None) => IndexStatus::default(),
+        }
     }
 
     pub fn set_status(&self, path: PathBuf, status: IndexStatus) {
@@ -298,7 +312,11 @@ pub fn create_shared_state_with_components(
     embedder: Embedder,
     vector_store: VectorStore,
 ) -> SharedState {
-    Arc::new(ContextState::with_components(config, embedder, vector_store))
+    Arc::new(ContextState::with_components(
+        config,
+        embedder,
+        vector_store,
+    ))
 }
 
 pub fn create_default_shared_state() -> SharedState {
@@ -308,6 +326,7 @@ pub fn create_default_shared_state() -> SharedState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_index_status_default() {
@@ -316,5 +335,38 @@ mod tests {
         assert_eq!(status.processed_files, 0);
         assert_eq!(status.total_chunks, 0);
         assert_eq!(status.status, IndexState::Idle);
+    }
+
+    #[test]
+    fn test_get_status_prefers_persisted_non_idle_over_stale_idle() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().to_path_buf();
+        let state = ContextState::with_components(
+            Config::default(),
+            Embedder::Disabled,
+            VectorStore::Local(LocalStore::new()),
+        );
+
+        state.set_status(path.clone(), IndexStatus::default());
+        state
+            .manifest_store
+            .write_status(
+                &path,
+                &IndexStatus {
+                    total_files: 3,
+                    processed_files: 2,
+                    total_chunks: 11,
+                    embeddings_generated: 7,
+                    vectors_inserted: 7,
+                    status: IndexState::Failed,
+                },
+            )
+            .unwrap();
+
+        let status = state.get_status(&path);
+
+        assert_eq!(status.status, IndexState::Failed);
+        assert_eq!(status.total_files, 3);
+        assert_eq!(status.vectors_inserted, 7);
     }
 }
