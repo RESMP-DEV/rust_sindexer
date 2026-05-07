@@ -22,8 +22,14 @@ impl CodeWalker {
     /// Create a new walker with default settings.
     pub fn new() -> Self {
         Self {
-            extensions: SUPPORTED_EXTENSIONS.iter().map(|s| (*s).to_string()).collect(),
-            ignore_patterns: DEFAULT_IGNORE_PATTERNS.iter().map(|s| (*s).to_string()).collect(),
+            extensions: SUPPORTED_EXTENSIONS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            ignore_patterns: DEFAULT_IGNORE_PATTERNS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
         }
     }
 
@@ -36,7 +42,11 @@ impl CodeWalker {
         use std::sync::Mutex;
 
         let start = Instant::now();
-        debug!(extensions = self.extensions.len(), ignore_patterns = self.ignore_patterns.len(), "Starting file walk");
+        debug!(
+            extensions = self.extensions.len(),
+            ignore_patterns = self.ignore_patterns.len(),
+            "Starting file walk"
+        );
         let files = std::sync::Arc::new(Mutex::new(Vec::new()));
         let extensions = self.extensions.clone();
         let mut builder = WalkBuilder::new(path);

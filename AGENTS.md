@@ -30,6 +30,12 @@ The AlphaHENG wrapper script (`scripts/run_claude_context_mcp.sh`) auto-discover
 - **Semantic + lexical** — Set `EMBEDDING_URL` to an OpenAI-compatible endpoint. Hybrid RRF fusion of semantic similarity + BM25. Local vector store handles project-scale indexing (<50K chunks).
 - **Full scale** — Set both `EMBEDDING_URL` and `MILVUS_URL` for large-scale deployments with Milvus/Zilliz Cloud as the vector backend.
 
+## Host Compatibility
+
+- **Apple Silicon macOS (including M-series / M4)** — build and test with the standard Cargo flow.
+- **Linux infra hosts** — same source build, covered in CI.
+- **GPU hosts** — point `EMBEDDING_URL` (or `OPENAI_BASE_URL`) at any OpenAI-compatible GPU-backed embeddings service. The binary itself remains CPU-only and communicates over HTTP.
+
 ## Production Configuration
 
 Current deployment uses Jina Embeddings + Zilliz Cloud, configured via `~/.context/.env`:
@@ -58,9 +64,9 @@ When embeddings are disabled, the pipeline stops after splitting and only popula
 
 Supported AST languages: Python, JavaScript, TypeScript, TSX, Rust, Go, Java, C++, C, Ruby, PHP, Swift, Scala, C#
 
-**Embedder** (`src/embedding/mod.rs`) — `Embedder` enum: `Http(EmbeddingClient)` for OpenAI-compatible APIs, or `Disabled` for lexical-only mode. Auto-detected from `EMBEDDING_URL` env var. Batches 100 texts per request. Empty env vars treated as unset.
+**Embedder** (`src/embedding/mod.rs`) — `Embedder` enum: `Http(EmbeddingClient)` for OpenAI-compatible APIs, or `Disabled` for lexical-only mode. Auto-detected from `EMBEDDING_URL` or `OPENAI_BASE_URL`. Batches 100 texts per request. Empty env vars treated as unset.
 
-**Vector Store** (`src/vectordb/`) — `VectorStore` enum: `Local(LocalStore)` for brute-force in-memory cosine similarity with JSON disk persistence (~75MB for 50K chunks at 384-dim), or `Milvus(MilvusClient)` for remote Milvus/Zilliz Cloud. Auto-detected from `MILVUS_URL` env var.
+**Vector Store** (`src/vectordb/`) — `VectorStore` enum: `Local(LocalStore)` for brute-force in-memory cosine similarity with JSON disk persistence (~75MB for 50K chunks at 384-dim), or `Milvus(MilvusClient)` for remote Milvus/Zilliz Cloud. Auto-detected from `MILVUS_URL` or `MILVUS_ADDRESS`.
 
 **Lexical Search** (`src/lexical/mod.rs`) — Tantivy-based BM25 index for keyword/symbol search.
 
@@ -92,11 +98,11 @@ Supported AST languages: Python, JavaScript, TypeScript, TSX, Rust, Go, Java, C+
 
 All optional. The server works with zero configuration.
 
-- `EMBEDDING_URL` — Embedding API base URL. Setting this enables semantic search. Any OpenAI-compatible endpoint (Jina, OpenAI, local).
-- `EMBEDDING_API_KEY` — API key for the embedding endpoint. Not needed for local servers.
+- `EMBEDDING_URL` — Embedding API base URL. Setting this enables semantic search. Any OpenAI-compatible endpoint (Jina, OpenAI, local). `OPENAI_BASE_URL` is also accepted.
+- `EMBEDDING_API_KEY` — API key for the embedding endpoint. Not needed for local servers. `OPENAI_API_KEY` is also accepted.
 - `EMBEDDING_MODEL` — Model name (default: `all-minilm`). Production uses `jina-code-embeddings-1.5b`.
 - `EMBEDDING_DIMENSION` — Vector dimension (default: `384`). Must match your model's output. Jina code embeddings use `1536`.
-- `MILVUS_URL` — Milvus/Zilliz Cloud endpoint. Setting this uses Milvus instead of the local vector store.
+- `MILVUS_URL` — Milvus/Zilliz Cloud endpoint. Setting this uses Milvus instead of the local vector store. `MILVUS_ADDRESS` is also accepted.
 - `MILVUS_TOKEN` — Authentication token for Milvus/Zilliz.
 - `MAX_FILE_SIZE` — Maximum file size in bytes (default: `1048576`, 1MB).
 - `LOG_LEVEL` — Logging verbosity: trace/debug/info/warn/error (default: `info`).

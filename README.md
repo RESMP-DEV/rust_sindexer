@@ -37,14 +37,22 @@ Python, JavaScript, TypeScript, TSX, Rust, Go, Java, C, C++, Ruby, PHP, Swift, S
 git clone https://github.com/RESMP-DEV/rust_sindexer
 cd rust_sindexer
 cargo build --release
-# Binary at target/release/rust_sindexer
+# Binary at target/release/sindexer
 ```
 
 ### Via cargo install
 
 ```bash
-cargo install rust_sindexer
+cargo install --path .
 ```
+
+## Host compatibility
+
+- **Apple Silicon macOS (including M-series / M4)** — supported via the standard `cargo build` / `cargo test` flow.
+- **Linux infra hosts** — supported via the same source build and CI matrix.
+- **GPU hosts** — supported without CUDA- or Metal-specific code in this binary; point `EMBEDDING_URL` (or `OPENAI_BASE_URL`) at any OpenAI-compatible GPU-backed embeddings service such as vLLM, TEI, Ollama, or Jina.
+
+The binary itself stays CPU-only and talks to embedding providers over HTTP, so the same build works on local laptops, infra boxes, and GPU-serving hosts.
 
 ## Prerequisites
 
@@ -122,14 +130,20 @@ MILVUS_URL=http://localhost:19530
 
 ## Configuration
 
-All configuration via environment variables:
+All configuration is via environment variables. Canonical names are preferred, and these compatibility aliases are also accepted:
 
-- `EMBEDDING_URL` — embedding API base URL (default: `http://localhost:8080/v1`)
-- `EMBEDDING_API_KEY` — API key for the embedding endpoint (omit for local servers)
-- `EMBEDDING_MODEL` — model name to request
+- `OPENAI_BASE_URL` → `EMBEDDING_URL`
+- `OPENAI_API_KEY` → `EMBEDDING_API_KEY`
+- `MILVUS_ADDRESS` → `MILVUS_URL`
+
+Empty values are treated as unset.
+
+- `EMBEDDING_URL` — embedding API base URL. When unset or empty, semantic search is disabled.
+- `EMBEDDING_API_KEY` — optional API key for the embedding endpoint (omit for local servers)
+- `EMBEDDING_MODEL` — model name to request (default: `all-minilm`)
 - `EMBEDDING_DIMENSION` — vector dimension (default: `384`). Must match your model's output.
-- `MILVUS_URL` — Milvus endpoint (default: `http://localhost:19530`)
-- `MILVUS_TOKEN` — Milvus auth token (omit for local unauthenticated instances)
+- `MILVUS_URL` — Milvus endpoint. When unset or empty, the local vector store is used.
+- `MILVUS_TOKEN` — optional Milvus auth token (omit for local unauthenticated instances)
 - `MAX_FILE_SIZE` — max file size to process in bytes (default: `1048576` / 1MB)
 - `LOG_LEVEL` — trace/debug/info/warn/error (default: `info`)
 
@@ -258,11 +272,11 @@ Subsequent runs will be incremental — only changed files get re-indexed.
 
 The JS version uses different variable names. Here's the mapping:
 
-- `OPENAI_API_KEY` → `EMBEDDING_API_KEY` (any OpenAI-compatible endpoint works, not just OpenAI)
-- `OPENAI_BASE_URL` → `EMBEDDING_URL` (full base URL to the embedding API)
+- `OPENAI_API_KEY` → `EMBEDDING_API_KEY` (still accepted directly for compatibility)
+- `OPENAI_BASE_URL` → `EMBEDDING_URL` (still accepted directly for compatibility)
 - `EMBEDDING_MODEL` → `EMBEDDING_MODEL` (same name)
 - (new) `EMBEDDING_DIMENSION` — required, must match your model's output dimension
-- `MILVUS_ADDRESS` → `MILVUS_URL` (full URL including port)
+- `MILVUS_ADDRESS` → `MILVUS_URL` (still accepted directly for compatibility)
 - `MILVUS_TOKEN` → `MILVUS_TOKEN` (same name)
 
 ### What stays the same
@@ -275,7 +289,7 @@ The JS version uses different variable names. Here's the mapping:
 
 - `extensionFilter: [".ts", ".py"]` becomes `extensions: ["ts", "py"]` (no dot prefix)
 - No `EMBEDDING_PROVIDER` selection — uses any OpenAI-compatible HTTP endpoint
-- No `~/.context/.env` file — all config via environment variables
+- No required `~/.context/.env` file — any environment injection mechanism works
 
 ## Architecture
 

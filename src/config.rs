@@ -2,6 +2,10 @@ use std::collections::HashSet;
 use std::env;
 use tracing::{debug, info};
 
+const EMBEDDING_URL_ENV_KEYS: &[&str] = &["EMBEDDING_URL", "OPENAI_BASE_URL"];
+const EMBEDDING_API_KEY_ENV_KEYS: &[&str] = &["EMBEDDING_API_KEY", "OPENAI_API_KEY"];
+const MILVUS_URL_ENV_KEYS: &[&str] = &["MILVUS_URL", "MILVUS_ADDRESS"];
+
 /// Supported file extensions for indexing (without leading dot).
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
     "py", "rs", "js", "ts", "tsx", "jsx", "go", "java", "cpp", "cc", "cxx", "c", "h", "hpp", "rb",
@@ -34,13 +38,13 @@ pub const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
 /// Application configuration loaded from environment variables with sensible defaults.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// URL for the embedding service.
+    /// URL for the embedding service. Empty disables semantic search.
     pub embedding_url: String,
     /// Model name for embeddings.
     pub embedding_model: String,
     /// Optional API key for embedding providers that require bearer auth.
     pub embedding_api_key: Option<String>,
-    /// URL for Milvus vector database.
+    /// URL for Milvus vector database. Empty uses the local vector store.
     pub milvus_url: String,
     /// Optional bearer token for authenticated Milvus-compatible endpoints.
     pub milvus_token: Option<String>,
@@ -69,10 +73,10 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            embedding_url: "http://localhost:8100".to_string(),
+            embedding_url: String::new(),
             embedding_model: "all-minilm".to_string(),
             embedding_api_key: None,
-            milvus_url: "http://localhost:19530".to_string(),
+            milvus_url: String::new(),
             milvus_token: None,
             chunk_size: 512,
             chunk_overlap: 64,
@@ -94,11 +98,13 @@ impl Config {
         let defaults = Self::default();
 
         let config = Self {
-            embedding_url: env::var("EMBEDDING_URL").unwrap_or(defaults.embedding_url),
-            embedding_model: env::var("EMBEDDING_MODEL").unwrap_or(defaults.embedding_model),
-            embedding_api_key: env::var("EMBEDDING_API_KEY").ok(),
-            milvus_url: env::var("MILVUS_URL").unwrap_or(defaults.milvus_url),
-            milvus_token: env::var("MILVUS_TOKEN").ok(),
+            embedding_url: first_non_empty_env(EMBEDDING_URL_ENV_KEYS)
+                .unwrap_or(defaults.embedding_url),
+            embedding_model: first_non_empty_env(&["EMBEDDING_MODEL"])
+                .unwrap_or(defaults.embedding_model),
+            embedding_api_key: first_non_empty_env(EMBEDDING_API_KEY_ENV_KEYS),
+            milvus_url: first_non_empty_env(MILVUS_URL_ENV_KEYS).unwrap_or(defaults.milvus_url),
+            milvus_token: first_non_empty_env(&["MILVUS_TOKEN"]),
             chunk_size: env::var("CHUNK_SIZE")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -141,9 +147,19 @@ impl Config {
                 .unwrap_or(defaults.embedding_tpm),
         };
         info!(
-            embedding_url = %config.embedding_url,
+            embedder = if config.has_embedding_url() { "http" } else { "disabled" },
+            embedding_url = if config.has_embedding_url() {
+                config.embedding_url.as_str()
+            } else {
+                "disabled"
+            },
             embedding_model = %config.embedding_model,
-            milvus_url = %config.milvus_url,
+            vector_store = if config.has_milvus_url() { "milvus" } else { "local" },
+            milvus_url = if config.has_milvus_url() {
+                config.milvus_url.as_str()
+            } else {
+                "local"
+            },
             chunk_size = config.chunk_size,
             batch_size = config.batch_size,
             concurrency = config.concurrency,
@@ -151,6 +167,16 @@ impl Config {
             "configuration loaded from environment"
         );
         config
+    }
+
+    #[inline]
+    pub fn has_embedding_url(&self) -> bool {
+        !self.embedding_url.is_empty()
+    }
+
+    #[inline]
+    pub fn has_milvus_url(&self) -> bool {
+        !self.milvus_url.is_empty()
     }
 
     /// Get effective thread count for parallel operations.
@@ -194,5 +220,129 @@ impl Config {
     pub fn should_include_extensionless(&self, name: &str) -> bool {
         let name_lower = name.to_lowercase();
         EXTENSIONLESS_FILES.contains(&name_lower.as_str())
+    }
+}
+
+fn first_non_empty_env(keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use once_cell::sync::Lazy;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+    const TEST_ENV_KEYS: &[&str] = &[
+        "EMBEDDING_URL",
+        "OPENAI_BASE_URL",
+        "EMBEDDING_API_KEY",
+        "OPENAI_API_KEY",
+        "MILVUS_URL",
+        "MILVUS_ADDRESS",
+        "MILVUS_TOKEN",
+    ];
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn new(overrides: &[(&str, Option<&str>)]) -> Self {
+            let saved = TEST_ENV_KEYS
+                .iter()
+                .map(|&key| (key, env::var(key).ok()))
+                .collect::<Vec<_>>();
+
+            for &key in TEST_ENV_KEYS {
+                env::remove_var(key);
+            }
+            for (key, value) in overrides {
+                match value {
+                    Some(value) => env::set_var(key, value),
+                    None => env::remove_var(key),
+                }
+            }
+
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => env::set_var(key, value),
+                    None => env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn from_env_prefers_canonical_names() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::new(&[
+            ("EMBEDDING_URL", Some("https://api.openai.com/v1")),
+            ("EMBEDDING_API_KEY", Some("secret")),
+            ("MILVUS_URL", Some("https://cluster.example.com:443")),
+            ("MILVUS_TOKEN", Some("token")),
+        ]);
+
+        let config = Config::from_env();
+
+        assert_eq!(config.embedding_url, "https://api.openai.com/v1");
+        assert_eq!(config.embedding_api_key.as_deref(), Some("secret"));
+        assert_eq!(config.milvus_url, "https://cluster.example.com:443");
+        assert_eq!(config.milvus_token.as_deref(), Some("token"));
+        assert!(config.has_embedding_url());
+        assert!(config.has_milvus_url());
+    }
+
+    #[test]
+    fn from_env_accepts_legacy_aliases() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::new(&[
+            ("OPENAI_BASE_URL", Some("https://api.jina.ai/v1")),
+            ("OPENAI_API_KEY", Some("jina-secret")),
+            (
+                "MILVUS_ADDRESS",
+                Some("https://cluster.zillizcloud.com:443"),
+            ),
+        ]);
+
+        let config = Config::from_env();
+
+        assert_eq!(config.embedding_url, "https://api.jina.ai/v1");
+        assert_eq!(config.embedding_api_key.as_deref(), Some("jina-secret"));
+        assert_eq!(config.milvus_url, "https://cluster.zillizcloud.com:443");
+        assert!(config.has_embedding_url());
+        assert!(config.has_milvus_url());
+    }
+
+    #[test]
+    fn from_env_treats_empty_urls_as_unset() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::new(&[
+            ("EMBEDDING_URL", Some("  ")),
+            ("OPENAI_BASE_URL", Some("")),
+            ("EMBEDDING_API_KEY", Some("")),
+            ("MILVUS_URL", Some(" ")),
+            ("MILVUS_ADDRESS", Some("")),
+        ]);
+
+        let config = Config::from_env();
+
+        assert_eq!(config.embedding_url, "");
+        assert_eq!(config.embedding_api_key, None);
+        assert_eq!(config.milvus_url, "");
+        assert!(!config.has_embedding_url());
+        assert!(!config.has_milvus_url());
     }
 }

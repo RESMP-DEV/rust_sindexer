@@ -146,13 +146,21 @@ pub static SPLITTABLE_NODES: LazyLock<HashMap<&'static str, &'static [&'static s
         // Scala
         m.insert(
             "scala",
-            &["function_definition", "class_definition", "object_definition"][..],
+            &[
+                "function_definition",
+                "class_definition",
+                "object_definition",
+            ][..],
         );
 
         // C#
         m.insert(
             "csharp",
-            &["method_declaration", "class_declaration", "struct_declaration"][..],
+            &[
+                "method_declaration",
+                "class_declaration",
+                "struct_declaration",
+            ][..],
         );
 
         m

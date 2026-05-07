@@ -53,26 +53,26 @@ pub struct ContextState {
 impl ContextState {
     pub fn new(config: Config) -> Self {
         info!("initializing context state");
-        let embedding_explicitly_set = std::env::var("EMBEDDING_URL")
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
-        let milvus_explicitly_set = std::env::var("MILVUS_URL")
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
-
-        let embedder = if embedding_explicitly_set {
-            info!("embedding enabled via EMBEDDING_URL");
+        let embedder = if config.has_embedding_url() {
+            info!("embedding enabled via configured URL");
             let embedding_config = EmbeddingConfig::from_config(&config);
-            let rate_limiter = crate::embedding::RateLimiter::new(config.embedding_rpm, config.embedding_tpm);
-            Embedder::Http(EmbeddingClient::with_rate_limiter(embedding_config, rate_limiter))
+            let rate_limiter =
+                crate::embedding::RateLimiter::new(config.embedding_rpm, config.embedding_tpm);
+            Embedder::Http(EmbeddingClient::with_rate_limiter(
+                embedding_config,
+                rate_limiter,
+            ))
         } else {
-            info!("embedding disabled (EMBEDDING_URL not set)");
+            info!("embedding disabled (no embedding URL configured)");
             Embedder::Disabled
         };
 
-        let vector_store = if milvus_explicitly_set {
+        let vector_store = if config.has_milvus_url() {
             info!(milvus_url = %config.milvus_url, "using Milvus vector store");
-            VectorStore::Milvus(MilvusClient::new(&config.milvus_url, config.milvus_token.clone()))
+            VectorStore::Milvus(MilvusClient::new(
+                &config.milvus_url,
+                config.milvus_token.clone(),
+            ))
         } else {
             info!("using local vector store");
             VectorStore::Local(LocalStore::new())
@@ -95,11 +95,7 @@ impl ContextState {
         }
     }
 
-    pub fn with_components(
-        config: Config,
-        embedder: Embedder,
-        vector_store: VectorStore,
-    ) -> Self {
+    pub fn with_components(config: Config, embedder: Embedder, vector_store: VectorStore) -> Self {
         let splitter_config = crate::splitter::Config {
             max_chunk_bytes: config.chunk_size,
             overlap_lines: config.chunk_overlap / 80,
@@ -298,7 +294,11 @@ pub fn create_shared_state_with_components(
     embedder: Embedder,
     vector_store: VectorStore,
 ) -> SharedState {
-    Arc::new(ContextState::with_components(config, embedder, vector_store))
+    Arc::new(ContextState::with_components(
+        config,
+        embedder,
+        vector_store,
+    ))
 }
 
 pub fn create_default_shared_state() -> SharedState {
@@ -316,5 +316,17 @@ mod tests {
         assert_eq!(status.processed_files, 0);
         assert_eq!(status.total_chunks, 0);
         assert_eq!(status.status, IndexState::Idle);
+    }
+
+    #[test]
+    fn test_context_state_uses_config_to_enable_backends() {
+        let state = ContextState::new(Config {
+            embedding_url: "https://api.jina.ai/v1".to_string(),
+            milvus_url: "https://cluster.zillizcloud.com:443".to_string(),
+            ..Config::default()
+        });
+
+        assert!(state.embedder.is_enabled());
+        assert!(matches!(state.vector_store, VectorStore::Milvus(_)));
     }
 }

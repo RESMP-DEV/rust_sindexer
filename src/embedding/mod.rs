@@ -3,8 +3,8 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
+use reqwest::header::{HeaderMap, AUTHORIZATION};
 use reqwest::Client;
-use reqwest::header::{AUTHORIZATION, HeaderMap};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
@@ -44,7 +44,9 @@ impl TokenBucket {
             None
         } else {
             let deficit = cost - self.tokens;
-            Some(std::time::Duration::from_secs_f64(deficit / self.refill_rate))
+            Some(std::time::Duration::from_secs_f64(
+                deficit / self.refill_rate,
+            ))
         }
     }
 }
@@ -192,7 +194,11 @@ impl EmbeddingClient {
             .build()
             .expect("failed to build HTTP client");
 
-        Self { client, config, rate_limiter }
+        Self {
+            client,
+            config,
+            rate_limiter,
+        }
     }
 
     /// Creates a new embedding client with default configuration.
@@ -218,7 +224,7 @@ impl EmbeddingClient {
 
         let start = std::time::Instant::now();
         let total_texts = texts.len();
-        let num_batches = (total_texts + self.config.batch_size - 1) / self.config.batch_size;
+        let num_batches = total_texts.div_ceil(self.config.batch_size);
         debug!(
             texts = total_texts,
             batches = num_batches,
@@ -267,7 +273,13 @@ impl EmbeddingClient {
                 model: &self.config.model,
             };
 
-            let response = match self.client.post(&self.config.url).json(&request).send().await {
+            let response = match self
+                .client
+                .post(&self.config.url)
+                .json(&request)
+                .send()
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => {
                     let backoff_secs = (BASE_BACKOFF_MS * 2u64.pow(attempt)) as f64 / 1000.0;
@@ -279,17 +291,15 @@ impl EmbeddingClient {
             };
 
             let status = response.status();
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                || status.is_server_error()
-            {
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
                 let retry_after = response
                     .headers()
                     .get("retry-after")
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.parse::<f64>().ok());
 
-                let backoff_secs = retry_after
-                    .unwrap_or((BASE_BACKOFF_MS * 2u64.pow(attempt)) as f64 / 1000.0);
+                let backoff_secs =
+                    retry_after.unwrap_or((BASE_BACKOFF_MS * 2u64.pow(attempt)) as f64 / 1000.0);
 
                 self.rate_limiter.penalize(backoff_secs);
                 let body = response.text().await.unwrap_or_default();
@@ -350,14 +360,18 @@ impl Embedder {
     pub async fn embed(&self, text: &str) -> Result<EmbeddingVector> {
         match self {
             Self::Http(client) => client.embed(text).await,
-            Self::Disabled => anyhow::bail!("Embedding is disabled. Set EMBEDDING_URL to enable semantic search."),
+            Self::Disabled => {
+                anyhow::bail!("Embedding is disabled. Set EMBEDDING_URL to enable semantic search.")
+            }
         }
     }
 
     pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<EmbeddingVector>> {
         match self {
             Self::Http(client) => client.embed_batch(texts).await,
-            Self::Disabled => anyhow::bail!("Embedding is disabled. Set EMBEDDING_URL to enable semantic search."),
+            Self::Disabled => {
+                anyhow::bail!("Embedding is disabled. Set EMBEDDING_URL to enable semantic search.")
+            }
         }
     }
 }

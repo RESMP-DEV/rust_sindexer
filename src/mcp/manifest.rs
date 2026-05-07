@@ -145,8 +145,9 @@ impl ManifestStore {
     pub fn write_status(&self, path: &Path, status: &IndexStatus) -> Result<()> {
         let status_path = status_path(path);
         if let Some(parent) = status_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create status directory {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create status directory {}", parent.display())
+            })?;
         }
 
         let json =

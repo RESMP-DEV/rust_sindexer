@@ -95,7 +95,11 @@ impl VectorStore {
         if relative_paths.is_empty() {
             return Ok(());
         }
-        debug!(collection, path_count = relative_paths.len(), "deleting by relative paths");
+        debug!(
+            collection,
+            path_count = relative_paths.len(),
+            "deleting by relative paths"
+        );
         match self {
             Self::Local(store) => store.delete_by_filter(collection, relative_paths),
             Self::Milvus(client) => {

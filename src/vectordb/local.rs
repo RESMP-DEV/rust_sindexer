@@ -25,6 +25,12 @@ pub struct LocalStore {
     collections: parking_lot::Mutex<HashMap<String, Collection>>,
 }
 
+impl Default for LocalStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LocalStore {
     pub fn new() -> Self {
         Self {
@@ -87,25 +93,27 @@ impl LocalStore {
         Ok(())
     }
 
-    pub fn insert_docs(
-        &self,
-        collection_name: &str,
-        docs: Vec<LocalDoc>,
-    ) -> Result<()> {
+    pub fn insert_docs(&self, collection_name: &str, docs: Vec<LocalDoc>) -> Result<()> {
         if docs.is_empty() {
             return Ok(());
         }
         let count = docs.len();
-        debug!(collection = collection_name, docs = count, "Inserting docs into local store");
+        debug!(
+            collection = collection_name,
+            docs = count,
+            "Inserting docs into local store"
+        );
         let mut collections = self.collections.lock();
         let collection = collections
             .entry(collection_name.to_string())
-            .or_insert_with(|| {
-                self.load_collection(collection_name).unwrap_or_default()
-            });
+            .or_insert_with(|| self.load_collection(collection_name).unwrap_or_default());
         collection.docs.extend(docs);
         self.persist_collection(collection_name, collection)?;
-        debug!(collection = collection_name, total_docs = collection.docs.len(), "Insert completed");
+        debug!(
+            collection = collection_name,
+            total_docs = collection.docs.len(),
+            "Insert completed"
+        );
         Ok(())
     }
 
@@ -144,17 +152,29 @@ impl LocalStore {
             Some(c) => c,
             None => {
                 if let Some(loaded) = self.load_collection(collection_name) {
-                    debug!(collection = collection_name, docs = loaded.docs.len(), "Loaded collection from disk");
+                    debug!(
+                        collection = collection_name,
+                        docs = loaded.docs.len(),
+                        "Loaded collection from disk"
+                    );
                     collections.insert(collection_name.to_string(), loaded);
                     collections.get(collection_name).unwrap()
                 } else {
-                    warn!(collection = collection_name, "Collection not found for search");
+                    warn!(
+                        collection = collection_name,
+                        "Collection not found for search"
+                    );
                     return Ok(Vec::new());
                 }
             }
         };
 
-        debug!(collection = collection_name, candidates = collection.docs.len(), top_k, "Brute-force cosine search");
+        debug!(
+            collection = collection_name,
+            candidates = collection.docs.len(),
+            top_k,
+            "Brute-force cosine search"
+        );
         let mut scored: Vec<(f32, &LocalDoc)> = collection
             .docs
             .iter()
@@ -207,12 +227,12 @@ impl LocalStore {
             .unwrap_or(0)
     }
 
-    pub fn delete_by_filter(
-        &self,
-        collection_name: &str,
-        relative_paths: &[String],
-    ) -> Result<()> {
-        debug!(collection = collection_name, paths = relative_paths.len(), "Deleting docs by relative path filter");
+    pub fn delete_by_filter(&self, collection_name: &str, relative_paths: &[String]) -> Result<()> {
+        debug!(
+            collection = collection_name,
+            paths = relative_paths.len(),
+            "Deleting docs by relative path filter"
+        );
         let mut collections = self.collections.lock();
         let collection = match collections.get_mut(collection_name) {
             Some(c) => c,
@@ -230,7 +250,12 @@ impl LocalStore {
         });
 
         let deleted = before - collection.docs.len();
-        debug!(collection = collection_name, deleted, remaining = collection.docs.len(), "Delete filter applied");
+        debug!(
+            collection = collection_name,
+            deleted,
+            remaining = collection.docs.len(),
+            "Delete filter applied"
+        );
         self.persist_collection(collection_name, collection)?;
         Ok(())
     }
@@ -260,9 +285,7 @@ fn dirs_path() -> PathBuf {
     if let Ok(dir) = std::env::var("XDG_CACHE_HOME") {
         PathBuf::from(dir).join("sindexer")
     } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home)
-            .join(".cache")
-            .join("sindexer")
+        PathBuf::from(home).join(".cache").join("sindexer")
     } else {
         PathBuf::from("/tmp/sindexer")
     }

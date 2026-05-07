@@ -85,7 +85,10 @@ impl CodeSplitter {
                         extract_chunks(&tree, &source, node_types, path, &relative_path, language)
                     }
                     None => {
-                        debug!("Failed to parse AST file {}, using fallback splitter", path.display());
+                        debug!(
+                            "Failed to parse AST file {}, using fallback splitter",
+                            path.display()
+                        );
                         self.fallback_chunks(
                             path,
                             &relative_path,
@@ -95,7 +98,9 @@ impl CodeSplitter {
                         )
                     }
                 },
-                None => self.fallback_chunks(path, &relative_path, &source, &extension, Some(language)),
+                None => {
+                    self.fallback_chunks(path, &relative_path, &source, &extension, Some(language))
+                }
             },
             None if is_supported_non_ast_extension(&extension) => {
                 self.fallback_chunks(path, &relative_path, &source, &extension, None)
@@ -260,13 +265,18 @@ fn split_markdown_chunks(
             overlap_lines,
         );
 
-        chunks.extend(section_chunks.into_iter().enumerate().map(|(sub_idx, mut chunk)| {
-            let chunk_line_count = chunk.end_line - chunk.start_line;
-            chunk.id = format!("{relative_path}:md:{section_idx}:{sub_idx}");
-            chunk.start_line = start_line + chunk.start_line - 1;
-            chunk.end_line = (chunk.start_line + chunk_line_count).min(*end_line);
-            chunk
-        }));
+        chunks.extend(
+            section_chunks
+                .into_iter()
+                .enumerate()
+                .map(|(sub_idx, mut chunk)| {
+                    let chunk_line_count = chunk.end_line - chunk.start_line;
+                    chunk.id = format!("{relative_path}:md:{section_idx}:{sub_idx}");
+                    chunk.start_line = start_line + chunk.start_line - 1;
+                    chunk.end_line = (chunk.start_line + chunk_line_count).min(*end_line);
+                    chunk
+                }),
+        );
     }
 
     chunks

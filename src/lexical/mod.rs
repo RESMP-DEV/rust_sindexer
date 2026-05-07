@@ -3,7 +3,6 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use tracing::debug;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::{
@@ -11,6 +10,7 @@ use tantivy::schema::{
     FAST, INDEXED, STORED, STRING,
 };
 use tantivy::{Index, IndexReader, IndexWriter, Term};
+use tracing::debug;
 
 use crate::mcp::HybridHit;
 use crate::types::CodeChunk;
@@ -32,11 +32,9 @@ impl LexicalIndex {
         })?;
 
         let index = if metadata_exists(&index_path) {
-            Index::open_in_dir(&index_path)
-                .context("failed to open existing lexical index")?
+            Index::open_in_dir(&index_path).context("failed to open existing lexical index")?
         } else {
-            Index::create_in_dir(&index_path, schema())
-                .context("failed to create lexical index")?
+            Index::create_in_dir(&index_path, schema()).context("failed to create lexical index")?
         };
         let reader = index
             .reader()
@@ -48,7 +46,10 @@ impl LexicalIndex {
     pub fn open(path: &Path) -> Result<Self> {
         let index_path = cache_dir_for(path)?;
         if !metadata_exists(&index_path) {
-            anyhow::bail!("failed to open lexical index at {}: metadata missing", index_path.display());
+            anyhow::bail!(
+                "failed to open lexical index at {}: metadata missing",
+                index_path.display()
+            );
         }
         let index = Index::open_in_dir(&index_path)
             .with_context(|| format!("failed to open lexical index at {}", index_path.display()))?;
@@ -81,7 +82,10 @@ impl LexicalIndex {
         if chunks.is_empty() {
             return Ok(());
         }
-        debug!(chunk_count = chunks.len(), "inserting chunks into lexical index");
+        debug!(
+            chunk_count = chunks.len(),
+            "inserting chunks into lexical index"
+        );
 
         let start = Instant::now();
         tracing::debug!(chunks = chunks.len(), "Inserting chunks into lexical index");
@@ -120,9 +124,15 @@ impl LexicalIndex {
         if relative_paths.is_empty() {
             return Ok(());
         }
-        debug!(path_count = relative_paths.len(), "deleting paths from lexical index");
+        debug!(
+            path_count = relative_paths.len(),
+            "deleting paths from lexical index"
+        );
 
-        tracing::debug!(paths = relative_paths.len(), "Deleting paths from lexical index");
+        tracing::debug!(
+            paths = relative_paths.len(),
+            "Deleting paths from lexical index"
+        );
         let fields = LexicalFields::new(self.index.schema())?;
         let mut writer = self
             .index
@@ -339,12 +349,7 @@ mod tests {
         }
     }
 
-    fn test_index() -> (
-        CacheEnvGuard,
-        TempDir,
-        TempDir,
-        LexicalIndex,
-    ) {
+    fn test_index() -> (CacheEnvGuard, TempDir, TempDir, LexicalIndex) {
         let cache_dir = TempDir::new().unwrap();
         let cache_lock = set_test_cache_dir(cache_dir.path());
 

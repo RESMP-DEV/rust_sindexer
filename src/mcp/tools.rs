@@ -22,8 +22,8 @@ use tokio::task;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, info};
 
-use super::indexer::{self, IndexerState};
 use super::hybrid::{fuse_hybrid_hits, HybridFusionOptions, HybridHit};
+use super::indexer::{self, IndexerState};
 use super::state::{create_default_shared_state, SharedState};
 use crate::embedding::{Embedder, EmbeddingClient, EmbeddingConfig};
 use crate::lexical::LexicalIndex;
@@ -75,14 +75,21 @@ fn create_indexer_state(state: &SharedState, root_path: &Path) -> Arc<IndexerSta
     });
 
     let embedder = if state.embedder.is_enabled() {
-        let rate_limiter = crate::embedding::RateLimiter::new(config.embedding_rpm, config.embedding_tpm);
-        Embedder::Http(EmbeddingClient::with_rate_limiter(EmbeddingConfig::from_config(config), rate_limiter))
+        let rate_limiter =
+            crate::embedding::RateLimiter::new(config.embedding_rpm, config.embedding_tpm);
+        Embedder::Http(EmbeddingClient::with_rate_limiter(
+            EmbeddingConfig::from_config(config),
+            rate_limiter,
+        ))
     } else {
         Embedder::Disabled
     };
 
     let vector_store = if matches!(state.vector_store, VectorStore::Milvus(_)) {
-        VectorStore::Milvus(MilvusClient::new(&config.milvus_url, config.milvus_token.clone()))
+        VectorStore::Milvus(MilvusClient::new(
+            &config.milvus_url,
+            config.milvus_token.clone(),
+        ))
     } else {
         VectorStore::Local(LocalStore::new())
     };
@@ -346,15 +353,13 @@ impl ServerHandler for CodebaseTools {
         }))
     }
 
-    fn call_tool(
+    async fn call_tool(
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
-        async move {
-            let tool_context = ToolCallContext::new(self, request, context);
-            self.tool_router.call(tool_context).await
-        }
+    ) -> Result<CallToolResult, McpError> {
+        let tool_context = ToolCallContext::new(self, request, context);
+        self.tool_router.call(tool_context).await
     }
 }
 
@@ -419,7 +424,12 @@ impl CodebaseTools {
             message: if result.warnings.is_empty() {
                 format!("Indexed {}{}", params.path, mode_hint)
             } else {
-                format!("Indexed {} ({}){}", params.path, result.warnings.join("; "), mode_hint)
+                format!(
+                    "Indexed {} ({}){}",
+                    params.path,
+                    result.warnings.join("; "),
+                    mode_hint
+                )
             },
             path,
             files_indexed: result.files_processed,
@@ -719,7 +729,9 @@ mod tests {
     use tokio::net::TcpListener;
 
     use crate::config::Config;
-    use crate::embedding::{EmbeddingClient as TestEmbeddingClient, EmbeddingConfig as TestEmbeddingConfig};
+    use crate::embedding::{
+        EmbeddingClient as TestEmbeddingClient, EmbeddingConfig as TestEmbeddingConfig,
+    };
     use crate::lexical::test_support::set_test_cache_dir_async;
     use crate::mcp::state::create_shared_state_with_components;
 
@@ -910,15 +922,17 @@ mod tests {
             milvus_url: milvus.base_url.clone(),
             ..Config::default()
         };
-        let embedder = crate::embedding::Embedder::Http(
-            TestEmbeddingClient::new(TestEmbeddingConfig::from_config(&config)),
-        );
+        let embedder = crate::embedding::Embedder::Http(TestEmbeddingClient::new(
+            TestEmbeddingConfig::from_config(&config),
+        ));
         let vector_store = crate::vectordb::VectorStore::Milvus(
             crate::vectordb::MilvusClient::new(&config.milvus_url, None),
         );
-        let tools = CodebaseTools::with_state(
-            create_shared_state_with_components(config, embedder, vector_store),
-        );
+        let tools = CodebaseTools::with_state(create_shared_state_with_components(
+            config,
+            embedder,
+            vector_store,
+        ));
 
         let Json(results) = tools
             .search_code(Parameters(SearchCodeParams {
@@ -1002,13 +1016,11 @@ mod tests {
             .unwrap();
 
         let config = Config::default();
-        let tools = CodebaseTools::with_state(
-            create_shared_state_with_components(
-                config,
-                crate::embedding::Embedder::Disabled,
-                crate::vectordb::VectorStore::Local(crate::vectordb::LocalStore::new()),
-            ),
-        );
+        let tools = CodebaseTools::with_state(create_shared_state_with_components(
+            config,
+            crate::embedding::Embedder::Disabled,
+            crate::vectordb::VectorStore::Local(crate::vectordb::LocalStore::new()),
+        ));
 
         let Json(results) = tools
             .search_code(Parameters(SearchCodeParams {
@@ -1031,33 +1043,36 @@ mod tests {
 
     #[tokio::test]
     async fn test_index_codebase_updates_shared_status() {
-        let milvus = spawn_mock_json_server_map_with_limit(HashMap::from([
-            (
-                "/v2/vectordb/collections/has",
-                serde_json::json!({
-                    "code": 0,
-                    "data": {"has": false}
-                }),
-            ),
-            (
-                "/v2/vectordb/collections/create",
-                serde_json::json!({
-                    "code": 0
-                }),
-            ),
-            (
-                "/v2/vectordb/entities/insert",
-                serde_json::json!({
-                    "code": 0
-                }),
-            ),
-            (
-                "/v2/vectordb/entities/delete",
-                serde_json::json!({
-                    "code": 0
-                }),
-            ),
-        ]), 8)
+        let milvus = spawn_mock_json_server_map_with_limit(
+            HashMap::from([
+                (
+                    "/v2/vectordb/collections/has",
+                    serde_json::json!({
+                        "code": 0,
+                        "data": {"has": false}
+                    }),
+                ),
+                (
+                    "/v2/vectordb/collections/create",
+                    serde_json::json!({
+                        "code": 0
+                    }),
+                ),
+                (
+                    "/v2/vectordb/entities/insert",
+                    serde_json::json!({
+                        "code": 0
+                    }),
+                ),
+                (
+                    "/v2/vectordb/entities/delete",
+                    serde_json::json!({
+                        "code": 0
+                    }),
+                ),
+            ]),
+            8,
+        )
         .await;
         let embedding = spawn_mock_embedding_server(serde_json::json!({
             "data": [{"embedding": [0.1, 0.2, 0.3]}],
@@ -1069,7 +1084,11 @@ mod tests {
         let repo_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
         let _cache_guard = set_test_cache_dir_async(cache_dir.path()).await;
-        std::fs::write(repo_dir.path().join("main.py"), "def add(a, b):\n    return a + b\n").unwrap();
+        std::fs::write(
+            repo_dir.path().join("main.py"),
+            "def add(a, b):\n    return a + b\n",
+        )
+        .unwrap();
 
         let config = Config {
             embedding_url: embedding.base_url.clone(),
@@ -1079,9 +1098,9 @@ mod tests {
             ..Config::default()
         };
         let make_state = |cfg: Config| {
-            let embedder = crate::embedding::Embedder::Http(
-                TestEmbeddingClient::new(TestEmbeddingConfig::from_config(&cfg)),
-            );
+            let embedder = crate::embedding::Embedder::Http(TestEmbeddingClient::new(
+                TestEmbeddingConfig::from_config(&cfg),
+            ));
             let vector_store = crate::vectordb::VectorStore::Milvus(
                 crate::vectordb::MilvusClient::new(&cfg.milvus_url, None),
             );

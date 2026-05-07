@@ -20,8 +20,8 @@ use crate::embedding::Embedder;
 use crate::lexical::LexicalIndex;
 use crate::splitter::CodeSplitter;
 use crate::types::{CodeChunk, IndexState, IndexStatus};
-use crate::vectordb::{collection_name_from_path, InsertRow, VectorStore};
 use crate::vectordb::client::milvus_id_for_chunk_id;
+use crate::vectordb::{collection_name_from_path, InsertRow, VectorStore};
 use crate::walker::CodeWalker;
 
 const EMBEDDING_BATCH_SIZE: usize = 100;
@@ -58,7 +58,14 @@ impl IndexerState {
         vector_store: VectorStore,
         embedding_dimension: usize,
     ) -> Self {
-        Self::with_concurrency(walker, splitter, embedder, vector_store, embedding_dimension, 16)
+        Self::with_concurrency(
+            walker,
+            splitter,
+            embedder,
+            vector_store,
+            embedding_dimension,
+            16,
+        )
     }
 
     pub fn with_concurrency(
@@ -87,11 +94,7 @@ impl IndexerState {
 }
 
 #[instrument(skip(state), fields(path = %path.display()))]
-pub async fn index_codebase(
-    state: &IndexerState,
-    path: &Path,
-    force: bool,
-) -> Result<IndexResult> {
+pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> Result<IndexResult> {
     let start = Instant::now();
     let mut warnings = Vec::new();
     let embeddings_enabled = state.embedder.is_enabled();
@@ -238,7 +241,14 @@ pub async fn index_codebase(
     }
 
     if files_to_index.is_empty() {
-        if let Err(e) = write_manifest(state, path, &collection_name, &index_inputs, &files, cached_fingerprints.take()) {
+        if let Err(e) = write_manifest(
+            state,
+            path,
+            &collection_name,
+            &index_inputs,
+            &files,
+            cached_fingerprints.take(),
+        ) {
             update_status_failed(state, path).await;
             return Err(e).context("Failed to write index manifest");
         }
@@ -264,8 +274,9 @@ pub async fn index_codebase(
     let chunk_results: Vec<Result<Vec<CodeChunk>, String>> = files_to_index
         .par_chunks(FILE_PARALLEL_CHUNK_SIZE)
         .flat_map(|file_batch| {
-            file_batch.par_iter().map(|file_path| {
-                match splitter.split_file(file_path) {
+            file_batch
+                .par_iter()
+                .map(|file_path| match splitter.split_file(file_path) {
                     Ok(chunks) => {
                         let count = processed_ref.fetch_add(1, Ordering::Relaxed) + 1;
                         if count.is_multiple_of(10) {
@@ -282,8 +293,7 @@ pub async fn index_codebase(
                         debug!("Failed to split {}: {}", file_path.display(), e);
                         Err(format!("Failed to split {}: {}", file_path.display(), e))
                     }
-                }
-            })
+                })
         })
         .collect();
 
@@ -450,7 +460,14 @@ pub async fn index_codebase(
         }
     };
 
-    if let Err(e) = write_manifest(state, path, &collection_name, &index_inputs, &files, cached_fingerprints.take()) {
+    if let Err(e) = write_manifest(
+        state,
+        path,
+        &collection_name,
+        &index_inputs,
+        &files,
+        cached_fingerprints.take(),
+    ) {
         update_status_failed(state, path).await;
         return Err(e).context("Failed to write index manifest");
     }
@@ -538,8 +555,14 @@ fn write_manifest(
     cached_fingerprints: Option<Vec<FileFingerprint>>,
 ) -> Result<()> {
     match cached_fingerprints {
-        Some(fp) => state.manifest_store.write_with_fingerprints(path, collection_name, index_inputs, fp),
-        None => state.manifest_store.write_for_files(path, collection_name, index_inputs, files),
+        Some(fp) => {
+            state
+                .manifest_store
+                .write_with_fingerprints(path, collection_name, index_inputs, fp)
+        }
+        None => state
+            .manifest_store
+            .write_for_files(path, collection_name, index_inputs, files),
     }
 }
 
