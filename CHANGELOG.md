@@ -9,3 +9,6 @@ All notable changes to `rust_sindexer` will be documented in this file.
   paths can intentionally share the same Milvus collection for one codebase.
 - `get_indexing_status` now reconciles completed shared-collection status from
   live vector-store row counts when a host did not perform the indexing run.
+- Hardened status reconciliation so delayed Milvus stats cannot lower completed
+  counters, while later higher live row counts raise all row-backed totals
+  together.
