@@ -28,7 +28,7 @@ use super::state::{create_default_shared_state, SharedState};
 use crate::embedding::{Embedder, EmbeddingClient, EmbeddingConfig};
 use crate::lexical::LexicalIndex;
 use crate::splitter::{CodeSplitter, Config as SplitterConfig};
-use crate::types::IndexStatus;
+use crate::types::{IndexState, IndexStatus};
 use crate::vectordb::{collection_name_from_path, LocalStore, MilvusClient, VectorStore};
 use crate::walker::CodeWalker;
 
@@ -549,7 +549,23 @@ impl CodebaseTools {
             ));
         }
 
-        let status = self.state.get_status(&path);
+        let mut status = self.state.get_status(&path);
+        if status.status != IndexState::Indexing {
+            let collection = collection_name_from_path(&path);
+            if let Ok(stats) = self.state.vector_store.collection_stats(&collection).await {
+                if stats.row_count > 0 && status.vectors_inserted != stats.row_count as usize {
+                    status.vectors_inserted = stats.row_count as usize;
+                    if status.embeddings_generated == 0 {
+                        status.embeddings_generated = stats.row_count as usize;
+                    }
+                    if status.total_chunks == 0 {
+                        status.total_chunks = stats.row_count as usize;
+                    }
+                    status.status = IndexState::Completed;
+                    self.state.set_status(path.clone(), status.clone());
+                }
+            }
+        }
         Ok(Json(status))
     }
 
