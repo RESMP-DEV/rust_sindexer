@@ -141,13 +141,13 @@ pub fn collection_name_from_path(path: &Path) -> String {
     collection_name_from_path_with_identity(path, identity)
 }
 
-pub fn collection_name_from_path_with_identity(path: &Path, identity: Option<&str>) -> String {
+fn collection_name_from_path_with_identity(path: &Path, identity: Option<&str>) -> String {
     let identity = identity.and_then(non_empty_trimmed);
     let collection_identity = identity
         .map(Cow::Borrowed)
         .unwrap_or_else(|| Cow::Owned(path.to_string_lossy().into_owned()));
 
-    // Hash the full path for uniqueness
+    // Hash the collection identity (provided identity or full path) for uniqueness.
     let mut hasher = Sha256::new();
     hasher.update(collection_identity.as_bytes());
     let hash = hex::encode(hasher.finalize());
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn test_collection_name_basic() {
         let path = PathBuf::from("/home/user/my-project");
-        let name = collection_name_from_path(&path);
+        let name = collection_name_from_path_with_identity(&path, None);
         assert!(name.starts_with("my_project_"));
         assert!(name.len() <= 255);
     }
@@ -220,14 +220,14 @@ mod tests {
     #[test]
     fn test_collection_name_numeric_start() {
         let path = PathBuf::from("/home/user/123project");
-        let name = collection_name_from_path(&path);
+        let name = collection_name_from_path_with_identity(&path, None);
         assert!(name.starts_with('_'));
     }
 
     #[test]
     fn test_collection_name_special_chars() {
         let path = PathBuf::from("/home/user/my.project-name@v2");
-        let name = collection_name_from_path(&path);
+        let name = collection_name_from_path_with_identity(&path, None);
         assert!(!name.contains('.'));
         assert!(!name.contains('-'));
         assert!(!name.contains('@'));
@@ -237,8 +237,8 @@ mod tests {
     fn test_collection_name_uniqueness() {
         let path1 = PathBuf::from("/home/user/project");
         let path2 = PathBuf::from("/home/other/project");
-        let name1 = collection_name_from_path(&path1);
-        let name2 = collection_name_from_path(&path2);
+        let name1 = collection_name_from_path_with_identity(&path1, None);
+        let name2 = collection_name_from_path_with_identity(&path2, None);
         assert_ne!(name1, name2);
     }
 
