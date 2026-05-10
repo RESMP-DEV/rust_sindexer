@@ -28,7 +28,7 @@ use super::state::{create_default_shared_state, SharedState};
 use crate::embedding::{Embedder, EmbeddingClient, EmbeddingConfig};
 use crate::lexical::LexicalIndex;
 use crate::splitter::{CodeSplitter, Config as SplitterConfig};
-use crate::types::IndexStatus;
+use crate::types::{IndexState, IndexStatus};
 use crate::vectordb::{collection_name_from_path, LocalStore, MilvusClient, VectorStore};
 use crate::walker::CodeWalker;
 
@@ -549,7 +549,25 @@ impl CodebaseTools {
             ));
         }
 
-        let status = self.state.get_status(&path);
+        let mut status = self.state.get_status(&path);
+        if matches!(status.status, IndexState::Idle | IndexState::Completed) {
+            let collection = collection_name_from_path(&path);
+            if let Ok(stats) = self.state.vector_store.collection_stats(&collection).await {
+                let live_rows = stats.row_count as usize;
+                if live_rows > 0
+                    && (status.vectors_inserted < live_rows
+                        || status.embeddings_generated < live_rows
+                        || status.total_chunks < live_rows
+                        || status.status == IndexState::Idle)
+                {
+                    status.vectors_inserted = status.vectors_inserted.max(live_rows);
+                    status.embeddings_generated = status.embeddings_generated.max(live_rows);
+                    status.total_chunks = status.total_chunks.max(live_rows);
+                    status.status = IndexState::Completed;
+                    self.state.set_status(path.clone(), status.clone());
+                }
+            }
+        }
         Ok(Json(status))
     }
 
@@ -1131,6 +1149,170 @@ mod tests {
         assert_eq!(status.total_chunks, 1);
 
         embedding.wait().await;
+        milvus.wait().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_indexing_status_raises_stale_counters_from_live_rows() {
+        let milvus = spawn_mock_json_server_map_with_limit(
+            HashMap::from([(
+                "/v2/vectordb/collections/get_stats",
+                serde_json::json!({
+                    "code": 0,
+                    "data": {"rowCount": 48999}
+                }),
+            )]),
+            1,
+        )
+        .await;
+
+        let repo_dir = tempdir().unwrap();
+        let config = Config {
+            milvus_url: milvus.base_url.clone(),
+            ..Config::default()
+        };
+        let state = create_shared_state_with_components(
+            config,
+            crate::embedding::Embedder::Disabled,
+            crate::vectordb::VectorStore::Milvus(crate::vectordb::MilvusClient::new(
+                &milvus.base_url,
+                None,
+            )),
+        );
+        state.set_status(
+            repo_dir.path().to_path_buf(),
+            IndexStatus {
+                total_files: 0,
+                processed_files: 0,
+                total_chunks: 47999,
+                embeddings_generated: 47999,
+                vectors_inserted: 47999,
+                status: IndexState::Completed,
+            },
+        );
+        let tools = CodebaseTools::with_state(state);
+
+        let Json(status) = tools
+            .get_indexing_status(Parameters(GetIndexingStatusParams {
+                path: repo_dir.path().to_string_lossy().into_owned(),
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(status.status, IndexState::Completed);
+        assert_eq!(status.total_chunks, 48999);
+        assert_eq!(status.embeddings_generated, 48999);
+        assert_eq!(status.vectors_inserted, 48999);
+
+        milvus.wait().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_indexing_status_does_not_lower_counters_during_stats_lag() {
+        let milvus = spawn_mock_json_server_map_with_limit(
+            HashMap::from([(
+                "/v2/vectordb/collections/get_stats",
+                serde_json::json!({
+                    "code": 0,
+                    "data": {"rowCount": 47999}
+                }),
+            )]),
+            1,
+        )
+        .await;
+
+        let repo_dir = tempdir().unwrap();
+        let config = Config {
+            milvus_url: milvus.base_url.clone(),
+            ..Config::default()
+        };
+        let state = create_shared_state_with_components(
+            config,
+            crate::embedding::Embedder::Disabled,
+            crate::vectordb::VectorStore::Milvus(crate::vectordb::MilvusClient::new(
+                &milvus.base_url,
+                None,
+            )),
+        );
+        state.set_status(
+            repo_dir.path().to_path_buf(),
+            IndexStatus {
+                total_files: 1824,
+                processed_files: 1824,
+                total_chunks: 48999,
+                embeddings_generated: 48999,
+                vectors_inserted: 48999,
+                status: IndexState::Completed,
+            },
+        );
+        let tools = CodebaseTools::with_state(state);
+
+        let Json(status) = tools
+            .get_indexing_status(Parameters(GetIndexingStatusParams {
+                path: repo_dir.path().to_string_lossy().into_owned(),
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(status.total_chunks, 48999);
+        assert_eq!(status.embeddings_generated, 48999);
+        assert_eq!(status.vectors_inserted, 48999);
+
+        milvus.wait().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_indexing_status_preserves_failed_status_when_live_rows_exist() {
+        let milvus = spawn_mock_json_server_map_with_limit(
+            HashMap::from([(
+                "/v2/vectordb/collections/get_stats",
+                serde_json::json!({
+                    "code": 0,
+                    "data": {"rowCount": 48999}
+                }),
+            )]),
+            1,
+        )
+        .await;
+
+        let repo_dir = tempdir().unwrap();
+        let config = Config {
+            milvus_url: milvus.base_url.clone(),
+            ..Config::default()
+        };
+        let state = create_shared_state_with_components(
+            config,
+            crate::embedding::Embedder::Disabled,
+            crate::vectordb::VectorStore::Milvus(crate::vectordb::MilvusClient::new(
+                &milvus.base_url,
+                None,
+            )),
+        );
+        state.set_status(
+            repo_dir.path().to_path_buf(),
+            IndexStatus {
+                total_files: 1824,
+                processed_files: 1800,
+                total_chunks: 47000,
+                embeddings_generated: 47000,
+                vectors_inserted: 47000,
+                status: IndexState::Failed,
+            },
+        );
+        let tools = CodebaseTools::with_state(state);
+
+        let Json(status) = tools
+            .get_indexing_status(Parameters(GetIndexingStatusParams {
+                path: repo_dir.path().to_string_lossy().into_owned(),
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(status.status, IndexState::Failed);
+        assert_eq!(status.total_chunks, 47000);
+        assert_eq!(status.embeddings_generated, 47000);
+        assert_eq!(status.vectors_inserted, 47000);
+
         milvus.wait().await;
     }
 }

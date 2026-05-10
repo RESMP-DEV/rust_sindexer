@@ -6,8 +6,12 @@ pub use local::LocalStore;
 
 use anyhow::Result;
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
+use std::env;
 use std::path::Path;
 use tracing::{debug, info};
+
+const COLLECTION_IDENTITY_ENV: &str = "SINDEXER_COLLECTION_IDENTITY";
 
 /// Selects between a local brute-force vector store and a remote Milvus instance.
 pub enum VectorStore {
@@ -119,29 +123,40 @@ fn build_relative_path_milvus_filter(relative_paths: &[String]) -> String {
     format!("metadata[\"relative_path\"] in [{serialized}]")
 }
 
-/// Generate a sanitized, hashed collection name from a filesystem path.
+/// Generate a sanitized, hashed collection name from a filesystem path or
+/// an operator-provided stable collection identity.
 ///
 /// Milvus collection names must:
 /// - Start with a letter or underscore
 /// - Contain only alphanumeric characters and underscores
 /// - Be at most 255 characters
 ///
-/// This function takes the last path component as a human-readable prefix,
-/// sanitizes it, and appends a truncated SHA-256 hash of the full path
-/// for uniqueness.
+/// By default, this function takes the last path component as a human-readable
+/// prefix, sanitizes it, and appends a truncated SHA-256 hash of the full path
+/// for uniqueness. Set `SINDEXER_COLLECTION_IDENTITY` to make multiple hosts
+/// with different checkout paths share the same backing collection.
 pub fn collection_name_from_path(path: &Path) -> String {
-    let full_path = path.to_string_lossy();
+    let identity = env::var(COLLECTION_IDENTITY_ENV).ok();
+    let identity = identity.as_deref().and_then(non_empty_trimmed);
+    collection_name_from_path_with_identity(path, identity)
+}
 
-    // Hash the full path for uniqueness
+fn collection_name_from_path_with_identity(path: &Path, identity: Option<&str>) -> String {
+    let identity = identity.and_then(non_empty_trimmed);
+    let collection_identity = identity
+        .map(Cow::Borrowed)
+        .unwrap_or_else(|| Cow::Owned(path.to_string_lossy().into_owned()));
+
+    // Hash the collection identity (provided identity or full path) for uniqueness.
     let mut hasher = Sha256::new();
-    hasher.update(full_path.as_bytes());
+    hasher.update(collection_identity.as_bytes());
     let hash = hex::encode(hasher.finalize());
     let hash_prefix = &hash[..16];
 
     // Extract and sanitize the last component for readability
-    let prefix = path
-        .file_name()
-        .and_then(|s| s.to_str())
+    let prefix = identity
+        .and_then(identity_prefix)
+        .or_else(|| path.file_name().and_then(|s| s.to_str()))
         .unwrap_or("collection");
 
     let sanitized: String = prefix
@@ -172,6 +187,23 @@ pub fn collection_name_from_path(path: &Path) -> String {
     format!("{}_{}", prefix_part, hash_prefix)
 }
 
+fn non_empty_trimmed(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn identity_prefix(identity: &str) -> Option<&str> {
+    Path::new(identity)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .and_then(non_empty_trimmed)
+        .or_else(|| non_empty_trimmed(identity))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,7 +212,7 @@ mod tests {
     #[test]
     fn test_collection_name_basic() {
         let path = PathBuf::from("/home/user/my-project");
-        let name = collection_name_from_path(&path);
+        let name = collection_name_from_path_with_identity(&path, None);
         assert!(name.starts_with("my_project_"));
         assert!(name.len() <= 255);
     }
@@ -188,14 +220,14 @@ mod tests {
     #[test]
     fn test_collection_name_numeric_start() {
         let path = PathBuf::from("/home/user/123project");
-        let name = collection_name_from_path(&path);
+        let name = collection_name_from_path_with_identity(&path, None);
         assert!(name.starts_with('_'));
     }
 
     #[test]
     fn test_collection_name_special_chars() {
         let path = PathBuf::from("/home/user/my.project-name@v2");
-        let name = collection_name_from_path(&path);
+        let name = collection_name_from_path_with_identity(&path, None);
         assert!(!name.contains('.'));
         assert!(!name.contains('-'));
         assert!(!name.contains('@'));
@@ -205,8 +237,30 @@ mod tests {
     fn test_collection_name_uniqueness() {
         let path1 = PathBuf::from("/home/user/project");
         let path2 = PathBuf::from("/home/other/project");
-        let name1 = collection_name_from_path(&path1);
-        let name2 = collection_name_from_path(&path2);
+        let name1 = collection_name_from_path_with_identity(&path1, None);
+        let name2 = collection_name_from_path_with_identity(&path2, None);
+        assert_ne!(name1, name2);
+    }
+
+    #[test]
+    fn test_collection_name_identity_overrides_absolute_path() {
+        let mac_path = PathBuf::from("/Users/kearm/AlphaHENG");
+        let linux_path = PathBuf::from("/home/kearm/AlphaHENG");
+
+        let mac_name = collection_name_from_path_with_identity(&mac_path, Some("AlphaHENG"));
+        let linux_name = collection_name_from_path_with_identity(&linux_path, Some("AlphaHENG"));
+
+        assert_eq!(mac_name, linux_name);
+        assert!(mac_name.starts_with("AlphaHENG_"));
+    }
+
+    #[test]
+    fn test_collection_name_blank_identity_falls_back_to_path() {
+        let path1 = PathBuf::from("/home/user/project");
+        let path2 = PathBuf::from("/home/other/project");
+        let name1 = collection_name_from_path_with_identity(&path1, Some("  "));
+        let name2 = collection_name_from_path_with_identity(&path2, Some(""));
+
         assert_ne!(name1, name2);
     }
 }
