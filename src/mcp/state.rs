@@ -118,11 +118,22 @@ impl ContextState {
     }
 
     pub fn get_status(&self, path: &Path) -> IndexStatus {
-        self.indexing_status
+        let in_memory = self
+            .indexing_status
             .get(&path.to_path_buf())
-            .map(|r| r.clone())
-            .or_else(|| self.manifest_store.load_status(path).ok().flatten())
-            .unwrap_or_default()
+            .map(|r| r.clone());
+        let persisted = self.manifest_store.load_status(path).ok().flatten();
+
+        match (in_memory, persisted) {
+            (Some(memory), Some(file))
+                if memory.status == IndexState::Idle && file.status != IndexState::Idle =>
+            {
+                file
+            }
+            (Some(memory), _) => memory,
+            (None, Some(file)) => file,
+            (None, None) => IndexStatus::default(),
+        }
     }
 
     pub fn set_status(&self, path: PathBuf, status: IndexStatus) {
@@ -308,6 +319,7 @@ pub fn create_default_shared_state() -> SharedState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_index_status_default() {
@@ -328,5 +340,38 @@ mod tests {
 
         assert!(state.embedder.is_enabled());
         assert!(matches!(state.vector_store, VectorStore::Milvus(_)));
+    }
+
+    #[test]
+    fn test_get_status_prefers_persisted_non_idle_over_stale_idle() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().to_path_buf();
+        let state = ContextState::with_components(
+            Config::default(),
+            Embedder::Disabled,
+            VectorStore::Local(LocalStore::new()),
+        );
+
+        state.set_status(path.clone(), IndexStatus::default());
+        state
+            .manifest_store
+            .write_status(
+                &path,
+                &IndexStatus {
+                    total_files: 3,
+                    processed_files: 2,
+                    total_chunks: 11,
+                    embeddings_generated: 7,
+                    vectors_inserted: 7,
+                    status: IndexState::Failed,
+                },
+            )
+            .unwrap();
+
+        let status = state.get_status(&path);
+
+        assert_eq!(status.status, IndexState::Failed);
+        assert_eq!(status.total_files, 3);
+        assert_eq!(status.vectors_inserted, 7);
     }
 }

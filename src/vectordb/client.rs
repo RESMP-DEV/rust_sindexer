@@ -146,6 +146,19 @@ struct MilvusResponse {
     message: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct InsertResponse {
+    code: i32,
+    data: Option<InsertResponseData>,
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct InsertResponseData {
+    #[serde(rename = "insertCount", default)]
+    insert_count: usize,
+}
+
 #[derive(Serialize)]
 struct DropCollectionRequest {
     #[serde(rename = "dbName")]
@@ -478,9 +491,9 @@ impl MilvusClient {
     /// # Arguments
     /// * `collection` - Collection name
     /// * `data` - Rows to insert
-    pub async fn insert_batch(&self, collection: &str, data: &[InsertRow]) -> Result<()> {
+    pub async fn insert_batch(&self, collection: &str, data: &[InsertRow]) -> Result<usize> {
         if data.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
 
         let batch_size = data.len();
@@ -532,7 +545,7 @@ impl MilvusClient {
                 continue;
             }
 
-            let response: MilvusResponse = response
+            let response: InsertResponse = response
                 .json()
                 .await
                 .context("failed to parse insert batch response")?;
@@ -548,10 +561,18 @@ impl MilvusClient {
             debug!(
                 collection,
                 rows = batch_size,
+                inserted = response
+                    .data
+                    .as_ref()
+                    .map(|data| data.insert_count)
+                    .unwrap_or(batch_size),
                 elapsed_ms = start.elapsed().as_millis() as u64,
                 "Milvus insert_batch completed"
             );
-            return Ok(());
+            return Ok(response
+                .data
+                .map(|data| data.insert_count)
+                .unwrap_or(batch_size));
         }
 
         let err_msg = last_err.unwrap_or_else(|| "unknown error".to_string());

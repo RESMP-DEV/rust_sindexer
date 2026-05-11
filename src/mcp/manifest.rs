@@ -19,6 +19,10 @@ pub struct IndexInputs {
     pub target_chunk_lines: u32,
     pub extensions: Vec<String>,
     pub ignore_patterns: Vec<String>,
+    #[serde(default)]
+    pub max_file_size: u64,
+    #[serde(default)]
+    pub follow_symlinks: bool,
 }
 
 impl IndexInputs {
@@ -26,6 +30,8 @@ impl IndexInputs {
         splitter: &splitter::Config,
         extensions: &[String],
         ignore_patterns: &[String],
+        max_file_size: u64,
+        follow_symlinks: bool,
     ) -> Self {
         Self {
             chunk_size: splitter.max_chunk_bytes,
@@ -34,6 +40,8 @@ impl IndexInputs {
             target_chunk_lines: splitter.target_chunk_lines,
             extensions: extensions.to_vec(),
             ignore_patterns: ignore_patterns.to_vec(),
+            max_file_size,
+            follow_symlinks,
         }
     }
 }
@@ -274,6 +282,8 @@ mod tests {
             target_chunk_lines: 50,
             extensions: vec!["rs".into()],
             ignore_patterns: vec!["target".into()],
+            max_file_size: 1024 * 1024,
+            follow_symlinks: false,
         };
 
         let previous = IndexManifest {
@@ -315,6 +325,8 @@ mod tests {
             target_chunk_lines: 40,
             extensions: vec!["rs".into()],
             ignore_patterns: vec!["target".into()],
+            max_file_size: 1024 * 1024,
+            follow_symlinks: false,
         };
         let store = ManifestStore;
         let files = vec![src.join("lib.rs")];

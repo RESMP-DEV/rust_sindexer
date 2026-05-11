@@ -19,12 +19,12 @@ use super::manifest::{diff_manifest_against_files, FileFingerprint, IndexInputs,
 use crate::embedding::Embedder;
 use crate::lexical::LexicalIndex;
 use crate::splitter::CodeSplitter;
-use crate::types::{CodeChunk, IndexState, IndexStatus};
+use crate::types::{CodeChunk, EmbeddingVector, IndexState, IndexStatus};
 use crate::vectordb::client::milvus_id_for_chunk_id;
 use crate::vectordb::{collection_name_from_path, InsertRow, VectorStore};
 use crate::walker::CodeWalker;
 
-const EMBEDDING_BATCH_SIZE: usize = 100;
+const EMBEDDING_BATCH_SIZE: usize = 32;
 const MILVUS_BATCH_SIZE: usize = 500;
 const FILE_PARALLEL_CHUNK_SIZE: usize = 64;
 
@@ -98,6 +98,7 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
     let start = Instant::now();
     let mut warnings = Vec::new();
     let embeddings_enabled = state.embedder.is_enabled();
+    let previous_status_before_index = state.manifest_store.load_status(path).ok().flatten();
 
     {
         let status = state.indexing_status.read().await;
@@ -126,6 +127,8 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
         state.splitter.config(),
         &state.walker.extensions,
         &state.walker.ignore_patterns,
+        state.walker.max_file_size,
+        state.walker.follow_symlinks,
     );
 
     // Phase 1: Walk files
@@ -173,38 +176,66 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
                 cached_fingerprints = Some(fingerprints);
 
                 if diff.is_empty() {
-                    update_status_completed(state, path, 0).await;
-                    return Ok(IndexResult {
-                        files_processed: 0,
-                        chunks_created: 0,
-                        embeddings_generated: 0,
-                        vectors_inserted: 0,
-                        duration_ms: start.elapsed().as_millis() as u64,
-                        warnings: vec!["already up to date".to_string()],
-                        lexical_only: !embeddings_enabled,
-                    });
+                    if embeddings_enabled
+                        && !state.vector_store.has_collection(&collection_name).await?
+                    {
+                        full_reindex = true;
+                    } else {
+                        let previous_status =
+                            previous_status_before_index.clone().unwrap_or_default();
+                        let vectors_inserted = if embeddings_enabled {
+                            vector_row_count(state, &collection_name)
+                                .await
+                                .unwrap_or(previous_status.vectors_inserted)
+                        } else {
+                            0
+                        };
+                        {
+                            let mut status = state.indexing_status.write().await;
+                            status.total_files = total_files;
+                        }
+                        update_status_completed_counts(
+                            state,
+                            path,
+                            previous_status.total_chunks,
+                            previous_status.embeddings_generated,
+                            vectors_inserted,
+                        )
+                        .await;
+                        return Ok(IndexResult {
+                            files_processed: 0,
+                            chunks_created: 0,
+                            embeddings_generated: 0,
+                            vectors_inserted,
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            warnings: vec!["already up to date".to_string()],
+                            lexical_only: !embeddings_enabled,
+                        });
+                    }
                 }
 
-                let changed_relative_paths = diff
-                    .added
-                    .iter()
-                    .chain(diff.modified.iter())
-                    .cloned()
-                    .collect::<std::collections::BTreeSet<_>>();
-                files_to_index = files
-                    .iter()
-                    .filter(|file_path| {
-                        changed_relative_paths.contains(&relative_path(path, file_path))
-                    })
-                    .cloned()
-                    .collect();
+                if !full_reindex {
+                    let changed_relative_paths = diff
+                        .added
+                        .iter()
+                        .chain(diff.modified.iter())
+                        .cloned()
+                        .collect::<std::collections::BTreeSet<_>>();
+                    files_to_index = files
+                        .iter()
+                        .filter(|file_path| {
+                            changed_relative_paths.contains(&relative_path(path, file_path))
+                        })
+                        .cloned()
+                        .collect();
 
-                stale_relative_paths = diff
-                    .deleted
-                    .iter()
-                    .chain(diff.modified.iter())
-                    .cloned()
-                    .collect();
+                    stale_relative_paths = diff
+                        .deleted
+                        .iter()
+                        .chain(diff.modified.iter())
+                        .cloned()
+                        .collect();
+                }
             }
             Some(_) | None => {
                 full_reindex = true;
@@ -329,9 +360,10 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
         Ok(())
     });
 
+    let split_warnings = warnings.clone();
     let embedding_handle = async {
         if total_chunks == 0 || !embeddings_enabled {
-            return Ok((0usize, 0usize));
+            return Ok((0usize, 0usize, Vec::new()));
         }
 
         let embedder = state.embedder.clone();
@@ -347,6 +379,7 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
         let semaphore = Arc::new(tokio::sync::Semaphore::new(state.concurrency));
         let mut batch_handles = FuturesUnordered::new();
         let mut batch_failures = Vec::new();
+        let mut embedding_warnings = Vec::new();
         let mut embeddings_generated = 0usize;
         let mut vectors_inserted = 0usize;
 
@@ -358,12 +391,11 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
             let permit = semaphore.clone().acquire_owned().await?;
 
             batch_handles.push(tokio::spawn(async move {
-                let batch_texts: Vec<String> =
-                    batch_chunks.iter().map(|c| c.content.clone()).collect();
-                let embeddings = emb.embed_batch(&batch_texts).await?;
-                let insert_rows: Vec<InsertRow> = batch_chunks
+                let (embedded_chunks, warnings) =
+                    embed_chunks_lossy(emb.as_ref(), batch_chunks).await;
+                let embedded = embedded_chunks.len();
+                let insert_rows: Vec<InsertRow> = embedded_chunks
                     .into_iter()
-                    .zip(embeddings.into_iter())
                     .map(|(chunk, embedding)| InsertRow {
                         id: milvus_id_for_chunk_id(&chunk.id),
                         content: chunk.content.clone(),
@@ -380,38 +412,40 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
 
                 let mut inserted = 0usize;
                 for rows in insert_rows.chunks(MILVUS_BATCH_SIZE) {
-                    vs.insert_batch(&collection, rows).await?;
-                    inserted += rows.len();
+                    inserted += vs.insert_batch(&collection, rows).await?;
                 }
 
                 drop(permit);
-                Ok::<(usize, usize), anyhow::Error>((batch_texts.len(), inserted))
+                Ok::<(usize, usize, Vec<String>), anyhow::Error>((embedded, inserted, warnings))
             }));
+
+            if batch_handles.len() >= state.concurrency {
+                if let Some(handle) = batch_handles.next().await {
+                    record_embedding_batch_result(
+                        handle,
+                        state,
+                        path,
+                        &mut embeddings_generated,
+                        &mut vectors_inserted,
+                        &mut embedding_warnings,
+                        &mut batch_failures,
+                    )
+                    .await;
+                }
+            }
         }
 
         while let Some(handle) = batch_handles.next().await {
-            match handle {
-                Ok(Ok((embedded, inserted))) => {
-                    embeddings_generated += embedded;
-                    vectors_inserted += inserted;
-                    info!(
-                        "Streaming progress: embeddings_generated={} vectors_inserted={}",
-                        embeddings_generated, vectors_inserted
-                    );
-                    let mut status = state.indexing_status.write().await;
-                    status.embeddings_generated = embeddings_generated;
-                    status.vectors_inserted = vectors_inserted;
-                    let _ = state.manifest_store.write_status(path, &status);
-                }
-                Ok(Err(e)) => {
-                    warn!("Streaming batch failed: {}", e);
-                    batch_failures.push(format!("Streaming batch failed: {}", e));
-                }
-                Err(e) => {
-                    warn!("Streaming batch task panicked: {}", e);
-                    batch_failures.push(format!("Streaming batch task panicked: {}", e));
-                }
-            }
+            record_embedding_batch_result(
+                handle,
+                state,
+                path,
+                &mut embeddings_generated,
+                &mut vectors_inserted,
+                &mut embedding_warnings,
+                &mut batch_failures,
+            )
+            .await;
         }
 
         if !batch_failures.is_empty() {
@@ -427,19 +461,21 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
         }
 
         if vectors_inserted == 0 {
+            let mut all_warnings = split_warnings.clone();
+            all_warnings.extend(embedding_warnings.clone());
             anyhow::bail!(
                 "Generated {} chunks and {} embeddings, but inserted 0 vectors{}",
                 total_chunks,
                 embeddings_generated,
-                if warnings.is_empty() {
+                if all_warnings.is_empty() {
                     String::new()
                 } else {
-                    format!(" ({})", warnings.join("; "))
+                    format!(" ({})", all_warnings.join("; "))
                 }
             );
         }
 
-        Ok((embeddings_generated, vectors_inserted))
+        Ok((embeddings_generated, vectors_inserted, embedding_warnings))
     };
 
     let (lexical_result, embedding_result) = tokio::join!(lexical_handle, embedding_handle);
@@ -452,13 +488,32 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
         return Err(e).context("Failed to update lexical index");
     }
 
-    let (embeddings_generated, vectors_inserted) = match embedding_result {
-        Ok(counts) => counts,
-        Err(e) => {
-            update_status_failed(state, path).await;
-            return Err(e);
+    let (embeddings_generated, mut vectors_inserted, mut embedding_warnings) =
+        match embedding_result {
+            Ok(counts) => counts,
+            Err(e) => {
+                update_status_failed(state, path).await;
+                return Err(e);
+            }
+        };
+    warnings.append(&mut embedding_warnings);
+    if embeddings_enabled {
+        if let Some(row_count) = vector_row_count(state, &collection_name).await {
+            if row_count != vectors_inserted {
+                warnings.push(format!(
+                    "Vector store reports {} rows after {} accepted insert responses",
+                    row_count, vectors_inserted
+                ));
+                vectors_inserted = row_count;
+            }
         }
-    };
+    }
+    if embeddings_enabled && vectors_inserted < embeddings_generated {
+        warnings.push(format!(
+            "Vector store accepted {} rows for {} generated embeddings",
+            vectors_inserted, embeddings_generated
+        ));
+    }
 
     if let Err(e) = write_manifest(
         state,
@@ -472,7 +527,14 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
         return Err(e).context("Failed to write index manifest");
     }
 
-    update_status_completed(state, path, total_chunks).await;
+    update_status_completed_counts(
+        state,
+        path,
+        total_chunks,
+        embeddings_generated,
+        vectors_inserted,
+    )
+    .await;
 
     let duration_ms = start.elapsed().as_millis() as u64;
     info!(
@@ -499,6 +561,104 @@ pub fn spawn_index_codebase(
     tokio::spawn(async move { index_codebase(&state, &path, force).await })
 }
 
+async fn record_embedding_batch_result(
+    handle: std::result::Result<
+        anyhow::Result<(usize, usize, Vec<String>)>,
+        tokio::task::JoinError,
+    >,
+    state: &IndexerState,
+    path: &Path,
+    embeddings_generated: &mut usize,
+    vectors_inserted: &mut usize,
+    embedding_warnings: &mut Vec<String>,
+    batch_failures: &mut Vec<String>,
+) {
+    match handle {
+        Ok(Ok((embedded, inserted, mut warnings))) => {
+            *embeddings_generated += embedded;
+            *vectors_inserted += inserted;
+            embedding_warnings.append(&mut warnings);
+            info!(
+                "Streaming progress: embeddings_generated={} vectors_inserted={}",
+                *embeddings_generated, *vectors_inserted
+            );
+            let mut status = state.indexing_status.write().await;
+            status.embeddings_generated = *embeddings_generated;
+            status.vectors_inserted = *vectors_inserted;
+            let _ = state.manifest_store.write_status(path, &status);
+        }
+        Ok(Err(e)) => {
+            warn!("Streaming batch failed: {}", e);
+            batch_failures.push(format!("Streaming batch failed: {}", e));
+        }
+        Err(e) => {
+            warn!("Streaming batch task panicked: {}", e);
+            batch_failures.push(format!("Streaming batch task panicked: {}", e));
+        }
+    }
+}
+
+async fn embed_chunks_lossy(
+    embedder: &Embedder,
+    chunks: Vec<CodeChunk>,
+) -> (Vec<(CodeChunk, EmbeddingVector)>, Vec<String>) {
+    let mut pending = vec![chunks];
+    let mut embedded_chunks = Vec::new();
+    let mut warnings = Vec::new();
+
+    while let Some(batch) = pending.pop() {
+        if batch.is_empty() {
+            continue;
+        }
+
+        let batch_size = batch.len();
+        let texts: Vec<String> = batch.iter().map(|chunk| chunk.content.clone()).collect();
+        match embedder.embed_batch(&texts).await {
+            Ok(embeddings) if embeddings.len() == batch_size => {
+                embedded_chunks.extend(batch.into_iter().zip(embeddings.into_iter()));
+            }
+            Ok(embeddings) => {
+                let err = format!(
+                    "embedding API returned {} results for {} inputs",
+                    embeddings.len(),
+                    batch_size
+                );
+                split_or_skip_embedding_batch(batch, err, &mut pending, &mut warnings);
+            }
+            Err(err) => {
+                split_or_skip_embedding_batch(batch, err.to_string(), &mut pending, &mut warnings);
+            }
+        }
+    }
+
+    (embedded_chunks, warnings)
+}
+
+fn split_or_skip_embedding_batch(
+    mut batch: Vec<CodeChunk>,
+    err: String,
+    pending: &mut Vec<Vec<CodeChunk>>,
+    warnings: &mut Vec<String>,
+) {
+    if batch.len() == 1 {
+        let chunk = batch.pop().expect("single chunk exists");
+        warnings.push(format!(
+            "Skipped embedding for {}:{}-{}: {}",
+            chunk.relative_path, chunk.start_line, chunk.end_line, err
+        ));
+        return;
+    }
+
+    warn!(
+        error = %err,
+        batch_size = batch.len(),
+        "Embedding batch failed; splitting batch to isolate unembeddable chunks"
+    );
+    let right = batch.split_off(batch.len() / 2);
+    pending.push(right);
+    pending.push(batch);
+}
+
 async fn update_status_failed(state: &IndexerState, path: &Path) {
     let mut status = state.indexing_status.write().await;
     status.status = IndexState::Failed;
@@ -506,11 +666,37 @@ async fn update_status_failed(state: &IndexerState, path: &Path) {
 }
 
 async fn update_status_completed(state: &IndexerState, path: &Path, chunks: usize) {
+    update_status_completed_counts(state, path, chunks, 0, 0).await;
+}
+
+async fn update_status_completed_counts(
+    state: &IndexerState,
+    path: &Path,
+    chunks: usize,
+    embeddings_generated: usize,
+    vectors_inserted: usize,
+) {
     let mut status = state.indexing_status.write().await;
     status.total_chunks = chunks;
     status.processed_files = status.total_files;
+    status.embeddings_generated = embeddings_generated;
+    status.vectors_inserted = vectors_inserted;
     status.status = IndexState::Completed;
     let _ = state.manifest_store.write_status(path, &status);
+}
+
+async fn vector_row_count(state: &IndexerState, collection_name: &str) -> Option<usize> {
+    match state.vector_store.collection_stats(collection_name).await {
+        Ok(stats) => Some(stats.row_count as usize),
+        Err(err) => {
+            debug!(
+                collection = collection_name,
+                error = %err,
+                "Unable to read vector row count"
+            );
+            None
+        }
+    }
 }
 
 async fn prepare_vector_index(
@@ -761,6 +947,76 @@ mod tests {
         }
     }
 
+    async fn spawn_selective_embedding_server() -> MockHttpServer {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let accept =
+                    tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept())
+                        .await;
+                let Ok(Ok((mut stream, _))) = accept else {
+                    break;
+                };
+
+                let request = read_http_request(&mut stream).await.unwrap();
+                let request_line = request.lines().next().unwrap_or_default();
+
+                let (status, response_body) = if request_line.contains("/v1/embeddings") {
+                    let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
+                    let inputs = serde_json::from_str::<serde_json::Value>(body)
+                        .ok()
+                        .and_then(|payload| {
+                            payload.get("input").and_then(|v| v.as_array()).cloned()
+                        })
+                        .unwrap_or_default();
+                    let has_bad_input = inputs.iter().any(|input| {
+                        input
+                            .as_str()
+                            .is_some_and(|text| text.contains("bad_embedding_payload"))
+                    });
+
+                    if has_bad_input {
+                        (
+                            "400 Bad Request",
+                            json!({
+                                "detail": {
+                                    "message": "Failed to encode text: input too large"
+                                }
+                            })
+                            .to_string(),
+                        )
+                    } else {
+                        let response = json!({
+                            "data": (0..inputs.len())
+                                .map(|idx| json!({ "embedding": [idx as f32 + 0.1, 0.2, 0.3, 0.4] }))
+                                .collect::<Vec<_>>()
+                        });
+                        ("200 OK", response.to_string())
+                    }
+                } else {
+                    (
+                        "404 Not Found",
+                        json!({ "code": 404, "message": "not found" }).to_string(),
+                    )
+                };
+
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        MockHttpServer {
+            base_url: format!("http://{addr}"),
+            handle,
+        }
+    }
+
     async fn spawn_mock_json_server(
         responses: HashMap<&'static str, serde_json::Value>,
     ) -> MockHttpServer {
@@ -909,7 +1165,8 @@ mod tests {
         )
         .unwrap();
 
-        let milvus = spawn_mock_milvus_server().await;
+        let milvus_state = Arc::new(Mutex::new(MockMilvusState::default()));
+        let milvus = spawn_stateful_mock_milvus_server(milvus_state).await;
         let embedding = spawn_mock_embedding_server(serde_json::json!({
             "data": [
                 {"embedding": [0.1, 0.2, 0.3]},
@@ -934,6 +1191,14 @@ mod tests {
                     .warnings
                     .iter()
                     .any(|warning| warning.contains("already up to date"))
+        );
+        let persisted_status = state.manifest_store.load_status(root).unwrap().unwrap();
+        assert_eq!(persisted_status.total_files, 2);
+        assert_eq!(persisted_status.processed_files, 2);
+        assert_eq!(persisted_status.total_chunks, first_result.chunks_created);
+        assert_eq!(
+            persisted_status.embeddings_generated,
+            first_result.embeddings_generated
         );
         assert!(manifest_path.exists());
 
@@ -1027,6 +1292,39 @@ mod tests {
         let err = index_codebase(&state, root, true).await.unwrap_err();
         assert!(err.to_string().contains("insert"));
         assert_eq!(state.get_status().await.status, IndexState::Failed);
+
+        embedding.wait().await;
+        milvus.wait().await;
+    }
+
+    #[tokio::test]
+    async fn test_index_skips_unembeddable_chunks_after_batch_failure() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        let cache_dir = TempDir::new().unwrap();
+        let _cache_lock = set_test_cache_dir_async(cache_dir.path()).await;
+        fs::write(root.join("good.py"), "def good():\n    return 1\n").unwrap();
+        fs::write(
+            root.join("bad.py"),
+            "def bad():\n    return 'bad_embedding_payload'\n",
+        )
+        .unwrap();
+
+        let milvus = spawn_mock_milvus_server().await;
+        let embedding = spawn_selective_embedding_server().await;
+        let state = make_test_indexer_state(root, &embedding.base_url, &milvus.base_url, 4);
+
+        let result = index_codebase(&state, root, true).await.unwrap();
+
+        assert!(result.chunks_created >= 2);
+        assert!(result.embeddings_generated > 0);
+        assert!(result.embeddings_generated < result.chunks_created);
+        assert_eq!(result.vectors_inserted, result.embeddings_generated);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Skipped embedding for bad.py")));
+        assert_eq!(state.get_status().await.status, IndexState::Completed);
 
         embedding.wait().await;
         milvus.wait().await;

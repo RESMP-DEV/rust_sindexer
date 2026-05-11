@@ -6,7 +6,7 @@ use std::time::Instant;
 use anyhow::Result;
 use tracing::{debug, info, instrument};
 
-use crate::config::{DEFAULT_IGNORE_PATTERNS, EXTENSIONLESS_FILES, SUPPORTED_EXTENSIONS};
+use crate::config::{Config, DEFAULT_IGNORE_PATTERNS, EXTENSIONLESS_FILES, SUPPORTED_EXTENSIONS};
 
 /// Walks a codebase to discover indexable files.
 ///
@@ -16,11 +16,20 @@ pub struct CodeWalker {
     pub extensions: Vec<String>,
     /// Additional patterns to ignore beyond .gitignore.
     pub ignore_patterns: Vec<String>,
+    /// Maximum file size in bytes to index (0 = unlimited).
+    pub max_file_size: u64,
+    /// Whether traversal follows symlinks.
+    pub follow_symlinks: bool,
 }
 
 impl CodeWalker {
     /// Create a new walker with default settings.
     pub fn new() -> Self {
+        Self::from_config(&Config::default())
+    }
+
+    /// Create a walker from application configuration.
+    pub fn from_config(config: &Config) -> Self {
         Self {
             extensions: SUPPORTED_EXTENSIONS
                 .iter()
@@ -30,6 +39,8 @@ impl CodeWalker {
                 .iter()
                 .map(|s| (*s).to_string())
                 .collect(),
+            max_file_size: config.max_file_size,
+            follow_symlinks: config.follow_symlinks,
         }
     }
 
@@ -53,6 +64,7 @@ impl CodeWalker {
 
         builder
             .hidden(true)
+            .follow_links(self.follow_symlinks)
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true);
@@ -73,9 +85,36 @@ impl CodeWalker {
         walker.run(|| {
             let files = files_ref.clone();
             let extensions = extensions.clone();
+            let ignore_patterns = self.ignore_patterns.clone();
+            let max_file_size = self.max_file_size;
             Box::new(move |entry| {
                 if let Ok(entry) = entry {
                     if entry.file_type().is_some_and(|ft| ft.is_file()) {
+                        if should_skip_path(path, entry.path(), &ignore_patterns) {
+                            return ignore::WalkState::Continue;
+                        }
+                        if max_file_size > 0 {
+                            match entry.metadata() {
+                                Ok(metadata) if metadata.len() > max_file_size => {
+                                    debug!(
+                                        path = %entry.path().display(),
+                                        size = metadata.len(),
+                                        max_file_size,
+                                        "Skipping oversized file"
+                                    );
+                                    return ignore::WalkState::Continue;
+                                }
+                                Err(err) => {
+                                    debug!(
+                                        path = %entry.path().display(),
+                                        error = %err,
+                                        "Skipping file with unreadable metadata"
+                                    );
+                                    return ignore::WalkState::Continue;
+                                }
+                                _ => {}
+                            }
+                        }
                         let include = if let Some(ext) = entry.path().extension() {
                             extensions
                                 .iter()
@@ -107,6 +146,22 @@ impl CodeWalker {
         );
         Ok(result)
     }
+}
+
+fn should_skip_path(root: &Path, path: &Path, ignore_patterns: &[String]) -> bool {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let components = relative
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+
+    ignore_patterns.iter().any(|pattern| {
+        let pattern = pattern.trim().trim_matches('/');
+        !pattern.is_empty()
+            && !pattern.contains('/')
+            && !pattern.contains('*')
+            && components.iter().any(|component| *component == pattern)
+    })
 }
 
 impl Default for CodeWalker {

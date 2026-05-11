@@ -95,7 +95,7 @@ fn create_indexer_state(state: &SharedState, root_path: &Path) -> Arc<IndexerSta
     };
 
     Arc::new(IndexerState::with_concurrency(
-        CodeWalker::new(),
+        CodeWalker::from_config(config),
         splitter,
         embedder,
         vector_store,
@@ -112,6 +112,10 @@ fn mirror_index_status(
     tokio::spawn(async move {
         loop {
             let status = indexer_state.get_status().await;
+            if is_default_idle_status(&status) {
+                sleep(Duration::from_millis(25)).await;
+                continue;
+            }
             let done = !matches!(status.status, crate::types::IndexState::Indexing);
             shared_state.set_status(path.clone(), status);
             if done {
@@ -120,6 +124,15 @@ fn mirror_index_status(
             sleep(Duration::from_millis(250)).await;
         }
     })
+}
+
+fn is_default_idle_status(status: &IndexStatus) -> bool {
+    status.status == crate::types::IndexState::Idle
+        && status.total_files == 0
+        && status.processed_files == 0
+        && status.total_chunks == 0
+        && status.embeddings_generated == 0
+        && status.vectors_inserted == 0
 }
 
 /// Parameters for checking indexing status.
@@ -391,7 +404,7 @@ impl CodebaseTools {
         }
 
         let indexer_state = create_indexer_state(&self.state, &path);
-        self.state.set_status(
+        self.state.indexing_status.insert(
             path.clone(),
             IndexStatus {
                 total_files: 0,
@@ -741,6 +754,7 @@ mod tests {
     use std::collections::HashMap;
     use std::io;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use tempfile::tempdir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1314,5 +1328,52 @@ mod tests {
         assert_eq!(status.vectors_inserted, 47000);
 
         milvus.wait().await;
+    }
+
+    #[tokio::test]
+    async fn test_status_mirror_does_not_clobber_persisted_completed_status() {
+        let repo_dir = tempdir().unwrap();
+        let path = repo_dir.path().to_path_buf();
+        let config = Config::default();
+        let shared = create_shared_state_with_components(
+            config.clone(),
+            crate::embedding::Embedder::Disabled,
+            crate::vectordb::VectorStore::Local(crate::vectordb::LocalStore::new()),
+        );
+        let completed = IndexStatus {
+            total_files: 4,
+            processed_files: 4,
+            total_chunks: 9,
+            embeddings_generated: 9,
+            vectors_inserted: 9,
+            status: crate::types::IndexState::Completed,
+        };
+        shared
+            .manifest_store
+            .write_status(&path, &completed)
+            .unwrap();
+
+        let splitter = CodeSplitter::new(SplitterConfig {
+            root_path: path.clone(),
+            max_chunk_bytes: config.chunk_size,
+            overlap_lines: config.chunk_overlap / 80,
+            ..SplitterConfig::default()
+        });
+        let indexer_state = Arc::new(IndexerState::new(
+            CodeWalker::new(),
+            splitter,
+            crate::embedding::Embedder::Disabled,
+            crate::vectordb::VectorStore::Local(crate::vectordb::LocalStore::new()),
+            config.embedding_dimension,
+        ));
+
+        let mirror = mirror_index_status(shared.clone(), indexer_state, path.clone());
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        mirror.abort();
+
+        let persisted = shared.manifest_store.load_status(&path).unwrap().unwrap();
+        assert_eq!(persisted.total_files, completed.total_files);
+        assert_eq!(persisted.total_chunks, completed.total_chunks);
+        assert_eq!(persisted.status, crate::types::IndexState::Completed);
     }
 }
