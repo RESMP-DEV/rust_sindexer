@@ -20,7 +20,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::task;
 use tokio::time::{sleep, Duration};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::hybrid::{fuse_hybrid_hits, HybridFusionOptions, HybridHit};
 use super::indexer::{self, IndexerState};
@@ -29,7 +29,10 @@ use crate::embedding::{Embedder, EmbeddingClient, EmbeddingConfig};
 use crate::lexical::LexicalIndex;
 use crate::splitter::{CodeSplitter, Config as SplitterConfig};
 use crate::types::{IndexState, IndexStatus};
-use crate::vectordb::{collection_name_from_path, LocalStore, MilvusClient, VectorStore};
+use crate::vectordb::{
+    collection_name_from_path, shared_collection_identity_enabled, LocalStore, MilvusClient,
+    VectorStore,
+};
 use crate::walker::CodeWalker;
 
 // ============================================================================
@@ -102,6 +105,46 @@ fn create_indexer_state(state: &SharedState, root_path: &Path) -> Arc<IndexerSta
         config.embedding_dimension,
         config.concurrency,
     ))
+}
+
+fn should_request_live_rows(status: &IndexStatus) -> bool {
+    match status.status {
+        IndexState::Idle => true,
+        IndexState::Completed => {
+            shared_collection_identity_enabled()
+                || status.vectors_inserted == 0
+                || status.embeddings_generated == 0
+                || status.total_chunks == 0
+        }
+        IndexState::Indexing | IndexState::Failed => false,
+    }
+}
+
+fn can_apply_live_rows(status: &IndexStatus, requested_from_idle: bool) -> bool {
+    match status.status {
+        IndexState::Idle => true,
+        IndexState::Completed => {
+            requested_from_idle
+                || shared_collection_identity_enabled()
+                || status.vectors_inserted == 0
+                || status.embeddings_generated == 0
+                || status.total_chunks == 0
+        }
+        IndexState::Indexing | IndexState::Failed => false,
+    }
+}
+
+fn checked_live_row_count(row_count: u64) -> usize {
+    match usize::try_from(row_count) {
+        Ok(count) => count,
+        Err(_) => {
+            warn!(
+                row_count,
+                "Milvus row count exceeds this platform's usize; capping status counters"
+            );
+            usize::MAX
+        }
+    }
 }
 
 fn mirror_index_status(
@@ -563,11 +606,14 @@ impl CodebaseTools {
         }
 
         let mut status = self.state.get_status(&path);
-        if matches!(status.status, IndexState::Idle | IndexState::Completed) {
+        if should_request_live_rows(&status) {
+            let requested_from_idle = status.status == IndexState::Idle;
             let collection = collection_name_from_path(&path);
             if let Ok(stats) = self.state.vector_store.collection_stats(&collection).await {
-                let live_rows = stats.row_count as usize;
+                let live_rows = checked_live_row_count(stats.row_count);
+                status = self.state.get_status(&path);
                 if live_rows > 0
+                    && can_apply_live_rows(&status, requested_from_idle)
                     && (status.vectors_inserted < live_rows
                         || status.embeddings_generated < live_rows
                         || status.total_chunks < live_rows
@@ -1201,7 +1247,7 @@ mod tests {
                 total_chunks: 47999,
                 embeddings_generated: 47999,
                 vectors_inserted: 47999,
-                status: IndexState::Completed,
+                status: IndexState::Idle,
             },
         );
         let tools = CodebaseTools::with_state(state);
@@ -1256,7 +1302,7 @@ mod tests {
                 total_chunks: 48999,
                 embeddings_generated: 48999,
                 vectors_inserted: 48999,
-                status: IndexState::Completed,
+                status: IndexState::Idle,
             },
         );
         let tools = CodebaseTools::with_state(state);
@@ -1327,7 +1373,7 @@ mod tests {
         assert_eq!(status.embeddings_generated, 47000);
         assert_eq!(status.vectors_inserted, 47000);
 
-        milvus.wait().await;
+        milvus.handle.abort();
     }
 
     #[tokio::test]

@@ -3,7 +3,7 @@
 //! Pipeline: walk → split (rayon) → embed (batched) → insert (streamed).
 //! When embeddings are disabled, only the lexical index is populated.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -21,7 +21,9 @@ use crate::lexical::LexicalIndex;
 use crate::splitter::CodeSplitter;
 use crate::types::{CodeChunk, EmbeddingVector, IndexState, IndexStatus};
 use crate::vectordb::client::milvus_id_for_chunk_id;
-use crate::vectordb::{collection_name_from_path, InsertRow, VectorStore};
+use crate::vectordb::{
+    collection_name_from_path, shared_collection_identity_enabled, InsertRow, VectorStore,
+};
 use crate::walker::CodeWalker;
 
 const EMBEDDING_BATCH_SIZE: usize = 32;
@@ -123,6 +125,7 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
     info!("Starting codebase indexing at {}", path.display());
 
     let collection_name = collection_name_from_path(path);
+    let shared_collection_identity = shared_collection_identity_enabled();
     let index_inputs = IndexInputs::from_splitter_and_walker(
         state.splitter.config(),
         &state.walker.extensions,
@@ -243,8 +246,20 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
         }
     }
 
+    let reset_vector_collection = plan_vector_collection_reset(
+        path,
+        &files,
+        &collection_name,
+        full_reindex,
+        embeddings_enabled,
+        shared_collection_identity,
+        &mut stale_relative_paths,
+        &mut warnings,
+    );
+
     if embeddings_enabled {
-        if let Err(e) = prepare_vector_index(state, &collection_name, full_reindex).await {
+        if let Err(e) = prepare_vector_index(state, &collection_name, reset_vector_collection).await
+        {
             update_status_failed(state, path).await;
             return Err(e).context("Failed to prepare vector collection");
         }
@@ -687,7 +702,7 @@ async fn update_status_completed_counts(
 
 async fn vector_row_count(state: &IndexerState, collection_name: &str) -> Option<usize> {
     match state.vector_store.collection_stats(collection_name).await {
-        Ok(stats) => Some(stats.row_count as usize),
+        Ok(stats) => Some(checked_vector_row_count(stats.row_count)),
         Err(err) => {
             debug!(
                 collection = collection_name,
@@ -695,6 +710,49 @@ async fn vector_row_count(state: &IndexerState, collection_name: &str) -> Option
                 "Unable to read vector row count"
             );
             None
+        }
+    }
+}
+
+fn plan_vector_collection_reset(
+    path: &Path,
+    files: &[PathBuf],
+    collection_name: &str,
+    full_reindex: bool,
+    embeddings_enabled: bool,
+    shared_collection_identity: bool,
+    stale_relative_paths: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) -> bool {
+    if !(full_reindex && embeddings_enabled && shared_collection_identity) {
+        return full_reindex;
+    }
+
+    *stale_relative_paths = files
+        .iter()
+        .map(|file_path| relative_path(path, file_path))
+        .collect();
+    warnings.push(
+        "Shared collection identity active; reindexing with relative-path deletes instead of dropping the collection"
+            .to_string(),
+    );
+    warn!(
+        collection = %collection_name,
+        path = %path.display(),
+        "Shared collection identity active; skipping full collection drop"
+    );
+    false
+}
+
+fn checked_vector_row_count(row_count: u64) -> usize {
+    match usize::try_from(row_count) {
+        Ok(count) => count,
+        Err(_) => {
+            warn!(
+                row_count,
+                "Milvus row count exceeds this platform's usize; capping status counters"
+            );
+            usize::MAX
         }
     }
 }
@@ -789,6 +847,32 @@ mod tests {
         async fn wait(self) {
             self.handle.await.unwrap();
         }
+    }
+
+    #[test]
+    fn test_shared_identity_full_reindex_plan_uses_relative_path_deletes() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        let files = vec![root.join("src/lib.rs"), root.join("README.md")];
+        let mut stale_relative_paths = Vec::new();
+        let mut warnings = Vec::new();
+
+        let reset_collection = plan_vector_collection_reset(
+            root,
+            &files,
+            "AlphaHENG_abc123",
+            true,
+            true,
+            true,
+            &mut stale_relative_paths,
+            &mut warnings,
+        );
+
+        assert!(!reset_collection);
+        assert_eq!(stale_relative_paths, vec!["src/lib.rs", "README.md"]);
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("relative-path deletes")));
     }
 
     async fn spawn_mock_milvus_server() -> MockHttpServer {

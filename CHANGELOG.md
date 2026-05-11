@@ -5,6 +5,7 @@ All notable changes to `rust_sindexer` will be documented in this file.
 ## [Unreleased]
 
 ### Added
+
 - Added `SINDEXER_COLLECTION_IDENTITY` so multiple hosts with different checkout
   paths can intentionally share the same Milvus collection for one codebase.
 - `get_indexing_status` now reconciles idle or completed shared-collection
@@ -15,6 +16,10 @@ All notable changes to `rust_sindexer` will be documented in this file.
   together.
 
 ### Fixed
+
+- Avoid dropping a whole shared Milvus collection during full reindex when
+  `SINDEXER_COLLECTION_IDENTITY` is active; use targeted relative-path deletes
+  before reinserting local files instead.
 - Prevent forced AlphaHENG indexing runs from walking common generated or vendor
   directories, following symlinks by default, or processing files above the
   configured `MAX_FILE_SIZE`.

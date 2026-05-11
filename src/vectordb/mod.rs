@@ -143,6 +143,14 @@ pub fn collection_name_from_path(path: &Path) -> String {
     collection_name_from_path_with_identity(path, identity)
 }
 
+pub fn shared_collection_identity_enabled() -> bool {
+    env::var(COLLECTION_IDENTITY_ENV)
+        .ok()
+        .as_deref()
+        .and_then(non_empty_trimmed)
+        .is_some()
+}
+
 fn collection_name_from_path_with_identity(path: &Path, identity: Option<&str>) -> String {
     let identity = identity.and_then(non_empty_trimmed);
     let collection_identity = identity
