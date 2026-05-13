@@ -6,6 +6,10 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ### Added
 
+- Added the `update_index` MCP tool for incremental-only refreshes of an
+  existing compatible codebase index. It touches only changed/deleted files and
+  fails instead of falling back to a full rebuild when the manifest or backing
+  collection is missing or incompatible.
 - Added `SINDEXER_COLLECTION_IDENTITY` so multiple hosts with different checkout
   paths can intentionally share the same Milvus collection for one codebase.
 - `get_indexing_status` now reconciles idle or completed shared-collection

@@ -49,6 +49,13 @@ pub struct IndexCodebaseParams {
     pub force: bool,
 }
 
+/// Parameters for incrementally updating an existing codebase index.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct UpdateIndexParams {
+    /// Absolute path to the codebase directory to update.
+    pub path: String,
+}
+
 /// Parameters for searching indexed code.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SearchCodeParams {
@@ -429,7 +436,8 @@ impl CodebaseTools {
         name = "index_codebase",
         description = "Index a codebase directory for semantic code search. Walks the directory, \
                        parses source files, extracts code chunks, and generates embeddings. \
-                       Use force=true to re-index an already indexed codebase."
+                       This may perform an initial full build when no compatible index exists. \
+                       Use force=true only when a full rebuild is intended."
     )]
     async fn index_codebase(
         &self,
@@ -482,6 +490,78 @@ impl CodebaseTools {
             } else {
                 format!(
                     "Indexed {} ({}){}",
+                    params.path,
+                    result.warnings.join("; "),
+                    mode_hint
+                )
+            },
+            path,
+            files_indexed: result.files_processed,
+            chunks_created: result.chunks_created,
+        }))
+    }
+
+    /// Incrementally update an existing codebase index.
+    ///
+    /// Refuses to fall back to a full rebuild when the manifest or collection
+    /// is missing or incompatible.
+    #[tool(
+        name = "update_index",
+        description = "Incrementally update an existing codebase index. Only changed and deleted \
+                       files are touched. Refuses to perform an initial or full rebuild when the \
+                       manifest or backing collection is missing or incompatible."
+    )]
+    async fn update_index(
+        &self,
+        params: Parameters<UpdateIndexParams>,
+    ) -> Result<Json<IndexResult>, McpError> {
+        let params = params.0;
+        info!(path = %params.path, "update_index called");
+        let path = validate_directory_path(&params.path)?;
+
+        if self.state.is_indexing(&path) {
+            return Err(invalid_path(format!(
+                "Indexing is already running for {}. Wait for it to complete before updating.",
+                path.display()
+            )));
+        }
+
+        let indexer_state = create_indexer_state(&self.state, &path);
+        self.state.indexing_status.insert(
+            path.clone(),
+            IndexStatus {
+                total_files: 0,
+                processed_files: 0,
+                total_chunks: 0,
+                embeddings_generated: 0,
+                vectors_inserted: 0,
+                status: crate::types::IndexState::Indexing,
+            },
+        );
+        let status_mirror =
+            mirror_index_status(self.state.clone(), indexer_state.clone(), path.clone());
+        let result = indexer::update_codebase_index(&indexer_state, &path).await;
+        let _ = status_mirror.await;
+        let result = result.map_err(|err| McpError::internal_error(err.to_string(), None))?;
+
+        let mode_hint = if result.lexical_only {
+            " (lexical only; set EMBEDDING_URL for semantic search)"
+        } else {
+            ""
+        };
+        info!(
+            path = %params.path,
+            files_indexed = result.files_processed,
+            chunks_created = result.chunks_created,
+            "update_index completed"
+        );
+        Ok(Json(IndexResult {
+            success: true,
+            message: if result.warnings.is_empty() {
+                format!("Updated {}{}", params.path, mode_hint)
+            } else {
+                format!(
+                    "Updated {} ({}){}",
                     params.path,
                     result.warnings.join("; "),
                     mode_hint
@@ -951,7 +1031,7 @@ mod tests {
     fn test_codebase_tools_creation() {
         let tools = CodebaseTools::default();
         let all_tools = tools.router().list_all();
-        assert_eq!(all_tools.len(), 7); // index_codebase, search_code, get_indexing_status, clear_index, list_collections, collection_stats, drop_collection
+        assert_eq!(all_tools.len(), 8); // index_codebase, update_index, search_code, get_indexing_status, clear_index, list_collections, collection_stats, drop_collection
     }
 
     #[tokio::test]

@@ -97,6 +97,20 @@ impl IndexerState {
 
 #[instrument(skip(state), fields(path = %path.display()))]
 pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> Result<IndexResult> {
+    run_index_codebase(state, path, force, false).await
+}
+
+#[instrument(skip(state), fields(path = %path.display()))]
+pub async fn update_codebase_index(state: &IndexerState, path: &Path) -> Result<IndexResult> {
+    run_index_codebase(state, path, false, true).await
+}
+
+async fn run_index_codebase(
+    state: &IndexerState,
+    path: &Path,
+    force: bool,
+    incremental_only: bool,
+) -> Result<IndexResult> {
     let start = Instant::now();
     let mut warnings = Vec::new();
     let embeddings_enabled = state.embedder.is_enabled();
@@ -104,7 +118,7 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
 
     {
         let status = state.indexing_status.read().await;
-        if status.status == IndexState::Indexing && !force {
+        if status.status == IndexState::Indexing && (!force || incremental_only) {
             anyhow::bail!("Indexing already in progress");
         }
     }
@@ -178,12 +192,21 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
 
                 cached_fingerprints = Some(fingerprints);
 
+                if embeddings_enabled
+                    && !state.vector_store.has_collection(&collection_name).await?
+                {
+                    if incremental_only {
+                        update_status_failed(state, path).await;
+                        anyhow::bail!(
+                            "Incremental update requires existing vector collection {}; run index_codebase only when a full rebuild is intended",
+                            collection_name
+                        );
+                    }
+                    full_reindex = true;
+                }
+
                 if diff.is_empty() {
-                    if embeddings_enabled
-                        && !state.vector_store.has_collection(&collection_name).await?
-                    {
-                        full_reindex = true;
-                    } else {
+                    if !full_reindex {
                         let previous_status =
                             previous_status_before_index.clone().unwrap_or_default();
                         let vectors_inserted = if embeddings_enabled {
@@ -240,7 +263,22 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
                         .collect();
                 }
             }
-            Some(_) | None => {
+            Some(_) => {
+                if incremental_only {
+                    update_status_failed(state, path).await;
+                    anyhow::bail!(
+                        "Incremental update requires a compatible index manifest; run index_codebase only when a full rebuild is intended"
+                    );
+                }
+                full_reindex = true;
+            }
+            None => {
+                if incremental_only {
+                    update_status_failed(state, path).await;
+                    anyhow::bail!(
+                        "Incremental update requires an existing index manifest; run index_codebase first only when a full build is intended"
+                    );
+                }
                 full_reindex = true;
             }
         }
@@ -299,7 +337,31 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
             return Err(e).context("Failed to write index manifest");
         }
 
-        update_status_completed(state, path, 0).await;
+        let vectors_inserted = if embeddings_enabled {
+            vector_row_count(state, &collection_name).await.unwrap_or(0)
+        } else {
+            0
+        };
+        {
+            let mut status = state.indexing_status.write().await;
+            status.total_files = total_files;
+        }
+        update_status_completed_counts(
+            state,
+            path,
+            if embeddings_enabled {
+                vectors_inserted
+            } else {
+                0
+            },
+            if embeddings_enabled {
+                vectors_inserted
+            } else {
+                0
+            },
+            vectors_inserted,
+        )
+        .await;
         return Ok(IndexResult {
             files_processed: 0,
             chunks_created: 0,
@@ -514,7 +576,7 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
     warnings.append(&mut embedding_warnings);
     if embeddings_enabled {
         if let Some(row_count) = vector_row_count(state, &collection_name).await {
-            if row_count != vectors_inserted {
+            if full_reindex && row_count != vectors_inserted {
                 warnings.push(format!(
                     "Vector store reports {} rows after {} accepted insert responses",
                     row_count, vectors_inserted
@@ -530,6 +592,17 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
         ));
     }
 
+    let completed_chunks = if embeddings_enabled && !full_reindex {
+        vectors_inserted
+    } else {
+        total_chunks
+    };
+    let completed_embeddings = if embeddings_enabled && !full_reindex {
+        vectors_inserted
+    } else {
+        embeddings_generated
+    };
+
     if let Err(e) = write_manifest(
         state,
         path,
@@ -542,11 +615,15 @@ pub async fn index_codebase(state: &IndexerState, path: &Path, force: bool) -> R
         return Err(e).context("Failed to write index manifest");
     }
 
+    {
+        let mut status = state.indexing_status.write().await;
+        status.total_files = total_files;
+    }
     update_status_completed_counts(
         state,
         path,
-        total_chunks,
-        embeddings_generated,
+        completed_chunks,
+        completed_embeddings,
         vectors_inserted,
     )
     .await;
@@ -678,10 +755,6 @@ async fn update_status_failed(state: &IndexerState, path: &Path) {
     let mut status = state.indexing_status.write().await;
     status.status = IndexState::Failed;
     let _ = state.manifest_store.write_status(path, &status);
-}
-
-async fn update_status_completed(state: &IndexerState, path: &Path, chunks: usize) {
-    update_status_completed_counts(state, path, chunks, 0, 0).await;
 }
 
 async fn update_status_completed_counts(
@@ -1228,6 +1301,86 @@ mod tests {
             VectorStore::Milvus(MilvusClient::new(milvus_url, None)),
             dimension,
         )
+    }
+
+    fn make_lexical_indexer_state(root: &Path) -> IndexerState {
+        IndexerState::new(
+            CodeWalker::new(),
+            CodeSplitter::new(SplitterConfig {
+                root_path: root.to_path_buf(),
+                max_chunk_bytes: Config::default().chunk_size,
+                overlap_lines: Config::default().chunk_overlap / 80,
+                ..SplitterConfig::default()
+            }),
+            Embedder::Disabled,
+            VectorStore::Local(crate::vectordb::LocalStore::new()),
+            384,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_incremental_update_requires_existing_manifest() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        let cache_dir = TempDir::new().unwrap();
+        let _cache_lock = set_test_cache_dir_async(cache_dir.path()).await;
+        fs::write(root.join("main.py"), "def add(a, b):\n    return a + b\n").unwrap();
+
+        let state = make_lexical_indexer_state(root);
+        let err = update_codebase_index(&state, root).await.unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("Incremental update requires an existing index manifest"));
+        assert_eq!(state.get_status().await.status, IndexState::Failed);
+    }
+
+    #[tokio::test]
+    async fn test_incremental_update_processes_only_changed_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        let cache_dir = TempDir::new().unwrap();
+        let _cache_lock = set_test_cache_dir_async(cache_dir.path()).await;
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(
+            src_dir.join("lib.rs"),
+            "pub fn alpha() -> i32 {\n    1\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            src_dir.join("main.rs"),
+            "fn main() {\n    println!(\"hi\");\n}\n",
+        )
+        .unwrap();
+
+        let state = make_lexical_indexer_state(root);
+        let first_result = index_codebase(&state, root, false).await.unwrap();
+        assert_eq!(first_result.files_processed, 2);
+
+        fs::write(
+            src_dir.join("main.rs"),
+            "fn main() {\n    println!(\"incremental update\");\n}\n",
+        )
+        .unwrap();
+
+        let update_result = update_codebase_index(&state, root).await.unwrap();
+        assert_eq!(update_result.files_processed, 1);
+        assert!(update_result.chunks_created > 0);
+        let status = state.get_status().await;
+        assert_eq!(status.total_files, 2);
+        assert_eq!(status.processed_files, 2);
+
+        let manifest = state.manifest_store.load(root).unwrap().unwrap();
+        assert_eq!(manifest.files.len(), 2);
+
+        let noop_result = update_codebase_index(&state, root).await.unwrap();
+        assert_eq!(noop_result.files_processed, 0);
+        assert_eq!(noop_result.chunks_created, 0);
+        assert!(noop_result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("already up to date")));
     }
 
     #[tokio::test]

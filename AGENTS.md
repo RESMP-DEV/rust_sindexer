@@ -72,7 +72,7 @@ Supported AST languages: Python, JavaScript, TypeScript, TSX, Rust, Go, Java, C+
 
 **Hybrid Fusion** (`src/mcp/hybrid.rs`) — Reciprocal Rank Fusion (RRF) combining semantic and lexical results. Works correctly when either source is empty.
 
-**Incremental Indexing** (`src/mcp/manifest.rs`) — File-hash manifest stored at `.sindexer/index-manifest.json`. Tracks SHA-256 per file to skip unchanged files on reindex. Pass `force: true` to bypass.
+**Incremental Indexing** (`src/mcp/manifest.rs`) — File-hash manifest stored at `.sindexer/index-manifest.json`. Tracks SHA-256 per file to skip unchanged files. Use `update_index` for changed-file-only refreshes that must refuse full rebuild fallback; pass `force: true` to `index_codebase` only when a full rebuild is intended.
 
 ## Key Files
 
@@ -89,7 +89,8 @@ Supported AST languages: Python, JavaScript, TypeScript, TSX, Rust, Go, Java, C+
 
 ## MCP Tools
 
-- **index_codebase** — walk, split, embed, and store a directory (incremental by default)
+- **index_codebase** — walk, split, embed, and store a directory; may do an initial full build when no compatible index exists
+- **update_index** — update an existing compatible index by touching only changed and deleted files, refusing full rebuild fallback
 - **search_code** — hybrid search (semantic + lexical) over indexed codebase
 - **get_indexing_status** — check indexing progress
 - **clear_index** — remove indexed data (vector + lexical)

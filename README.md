@@ -15,7 +15,7 @@ The official JS-based Claude Context MCP has several pain points:
 rust_sindexer fixes all of these:
 
 - **Single binary** — no runtime dependencies, ~37MB native executable
-- **Incremental indexing** — SHA-256 manifest tracks file changes, skips unchanged files
+- **Incremental updates** — SHA-256 manifest tracks file changes, and `update_index` touches only changed/deleted files without falling back to a full rebuild
 - **Full .gitignore support** — via the `ignore` crate with nested directory support
 - **Instant startup** — native binary, no package manager involved
 - **REST API for Milvus** — no gRPC, no timeout issues
@@ -183,9 +183,10 @@ Add to `.mcp.json` in the project root.
 
 ### MCP Tools
 
-Once configured, the server exposes four tools:
+Once configured, the server exposes five core tools:
 
-- **`index_codebase`** — Starts indexing a directory in the background. Incremental by default; pass `force: true` to rebuild from scratch. Poll `get_indexing_status` until the status becomes `completed` or `failed`.
+- **`index_codebase`** — Indexes a directory. It may perform an initial full build when no compatible index exists; pass `force: true` only when a full rebuild is intended. Poll `get_indexing_status` until the status becomes `completed` or `failed`.
+- **`update_index`** — Incrementally updates an existing compatible index by touching only changed/deleted files. It refuses to perform an initial or full rebuild if the manifest or backing collection is missing or incompatible.
 - **`search_code`** — Hybrid search (semantic + BM25 lexical) with Reciprocal Rank Fusion. Returns code chunks with file paths, line numbers, and relevance scores. If semantic search is unavailable but the lexical index exists, the server falls back to lexical-only results.
 - **`get_indexing_status`** — Check whether indexing is in progress, completed, or not started.
 - **`clear_index`** — Remove all indexed data (vectors + lexical index) for a codebase.
@@ -266,7 +267,8 @@ Since the embedding model and chunk boundaries differ, clear your existing index
 > get_indexing_status for /path/to/project
 ```
 
-Subsequent runs will be incremental — only changed files get re-indexed.
+For routine refreshes after that first build, call `update_index` so only
+changed/deleted files are touched and the tool refuses full rebuild fallback.
 
 ### Environment variable mapping
 
@@ -281,7 +283,7 @@ The JS version uses different variable names. Here's the mapping:
 
 ### What stays the same
 
-- Tool names: `index_codebase`, `search_code`, `get_indexing_status`, `clear_index`
+- Tool names: `index_codebase`, `update_index`, `search_code`, `get_indexing_status`, `clear_index`
 - Core parameters: `path`, `query`, `limit`, `force`
 - Config file locations: `~/.mcp.json`, `~/.claude/mcp.json`, `.mcp.json`
 
