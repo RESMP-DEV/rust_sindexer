@@ -21,6 +21,12 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ### Fixed
 
+- Load legacy manifests without `max_file_size` as the historical 1MB default
+  instead of zero, so `update_index` does not reject old compatible manifests
+  solely because the manifest schema grew.
+- Ignore `.sindexer`, `.rust_sindexer`, `.worktrees`, `agent_workspace`, and
+  `logs` during file discovery so refreshes do not index generated metadata,
+  local agent sandboxes, or runtime logs.
 - Avoid dropping a whole shared Milvus collection during full reindex when
   `SINDEXER_COLLECTION_IDENTITY` is active; use targeted relative-path deletes
   before reinserting local files instead.

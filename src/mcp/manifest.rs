@@ -19,10 +19,14 @@ pub struct IndexInputs {
     pub target_chunk_lines: u32,
     pub extensions: Vec<String>,
     pub ignore_patterns: Vec<String>,
-    #[serde(default)]
+    #[serde(default = "default_max_file_size")]
     pub max_file_size: u64,
     #[serde(default)]
     pub follow_symlinks: bool,
+}
+
+fn default_max_file_size() -> u64 {
+    1024 * 1024
 }
 
 impl IndexInputs {
@@ -340,6 +344,26 @@ mod tests {
         assert!(!manifest.matches_index_inputs("other", &inputs));
         assert_eq!(manifest.files.len(), 1);
         assert_eq!(manifest.files[0].relative_path, "src/lib.rs");
+    }
+
+    #[test]
+    fn legacy_manifest_defaults_match_historical_walker_inputs() {
+        let manifest: IndexManifest = serde_json::from_value(serde_json::json!({
+            "collection_name": "collection",
+            "inputs": {
+                "chunk_size": 512,
+                "overlap_lines": 3,
+                "min_chunk_lines": 5,
+                "target_chunk_lines": 50,
+                "extensions": ["rs"],
+                "ignore_patterns": ["target"]
+            },
+            "files": []
+        }))
+        .unwrap();
+
+        assert_eq!(manifest.inputs.max_file_size, 1024 * 1024);
+        assert!(!manifest.inputs.follow_symlinks);
     }
 
     #[test]

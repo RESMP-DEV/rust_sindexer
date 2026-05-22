@@ -75,6 +75,27 @@ fn test_manifest_round_trip_and_matches_inputs() {
 }
 
 #[test]
+fn test_legacy_manifest_defaults_match_current_walker_defaults() {
+    let manifest: sindexer::mcp::manifest::IndexManifest =
+        serde_json::from_value(serde_json::json!({
+            "collection_name": "collection",
+            "inputs": {
+                "chunk_size": 512,
+                "overlap_lines": 3,
+                "min_chunk_lines": 5,
+                "target_chunk_lines": 50,
+                "extensions": ["rs"],
+                "ignore_patterns": ["target"]
+            },
+            "files": []
+        }))
+        .unwrap();
+
+    assert_eq!(manifest.inputs.max_file_size, 1024 * 1024);
+    assert!(!manifest.inputs.follow_symlinks);
+}
+
+#[test]
 fn test_diff_reports_added_modified_and_deleted_files() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
