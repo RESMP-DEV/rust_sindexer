@@ -43,7 +43,7 @@ uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 hex = "0.4"
 schemars = "1"
-tantivy = "0.22"
+tantivy = "=0.26.1" # GHSA-rhfx-m35p-ff5j
 
 [features]
 default = ["mcp"]

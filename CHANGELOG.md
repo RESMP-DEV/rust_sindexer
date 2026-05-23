@@ -21,6 +21,10 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ### Fixed
 
+- Pinned `tantivy` to `0.26.1` so the lexical-index dependency chain resolves
+  to a patched `lru` release instead of the vulnerable `0.12.x` line flagged
+  by Dependabot.
+
 - Load legacy manifests without `max_file_size` as the historical 1MB default
   instead of zero, so `update_index` does not reject old compatible manifests
   solely because the manifest schema grew.
