@@ -150,6 +150,19 @@ impl LexicalIndex {
         Ok(())
     }
 
+    /// Performs a lexical search over the index and returns the top matching hits.
+    ///
+    /// The query is parsed and executed against the indexed `content` field; results are
+    /// ordered by score and limited by `limit`. If `limit` is zero, an empty vector is returned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Assume `index` is a ready `LexicalIndex`.
+    /// let hits = index.search("target_keyword", 10).unwrap();
+    /// // At most `limit` results are returned and each hit has a `chunk` and a `score`.
+    /// assert!(hits.len() <= 10);
+    /// ```
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<HybridHit>> {
         debug!(query_len = query.len(), limit, "lexical search");
         if limit == 0 {
@@ -249,15 +262,79 @@ impl LexicalFields {
     }
 }
 
+/// Retrieves the first stored string value for a field from a Tantivy document.
+///
+/// If the field has a stored string value, returns that value as a `String`; otherwise returns `None`.
+///
+/// # Examples
+///
+/// ```
+/// use tantivy::schema::{Schema, SchemaBuilder, TextOptions, STORED, TEXT};
+/// use tantivy::doc;
+/// use tantivy::schema::Field;
+///
+/// // Build a minimal schema with a stored text field.
+/// let mut schema_builder = SchemaBuilder::new();
+/// let text_opts = TextOptions::default().set_stored();
+/// let field: Field = schema_builder.add_text_field("content", text_opts);
+/// let schema: Schema = schema_builder.build();
+///
+/// // Create a document with the stored field.
+/// let document = doc!(field => "hello world");
+///
+/// // Call the helper (assumes `string_value` is in scope).
+/// let value = crate::lexical::string_value(&document, field);
+/// assert_eq!(value.as_deref(), Some("hello world"));
+/// ```
 fn string_value(doc: &TantivyDocument, field: Field) -> Option<String> {
     doc.get_first(field)
         .and_then(|value| value.as_str().map(ToString::to_string))
 }
 
+/// Extracts the first stored unsigned integer value for a field from a Tantivy document.
+///
+/// # Examples
+///
+/// ```
+/// use tantivy::schema::{SchemaBuilder, STORED, FAST};
+/// use tantivy::doc;
+///
+/// // Build a schema with a stored u64 field
+/// let mut schema_builder = SchemaBuilder::default();
+/// let field = schema_builder.add_u64_field("num", STORED | FAST);
+/// let _schema = schema_builder.build();
+///
+/// // Create a document containing the stored u64 value
+/// let document = doc!(field => 42u64);
+///
+/// // Read the value back
+/// let v = crate::u64_value(&document, field);
+/// assert_eq!(v, Some(42u64));
+/// ```
 fn u64_value(doc: &TantivyDocument, field: Field) -> Option<u64> {
     doc.get_first(field).and_then(|value| value.as_u64())
 }
 
+/// Constructs the Tantivy schema used by the lexical index.
+///
+/// Fields:
+/// - `id`: stored string identifier.
+/// - `content`: stored full-text field indexed with positions and term frequencies using the `"default"` tokenizer.
+/// - `relative_path`: stored string containing the file path relative to the project root.
+/// - `start_line`, `end_line`: stored, indexed, and fast `u64` fields for chunk line ranges.
+/// - `language`: stored string indicating the chunk's programming language.
+///
+/// # Examples
+///
+/// ```
+/// let s = schema();
+/// assert!(s.get_field("id").is_some());
+/// assert!(s.get_field("content").is_some());
+/// assert!(s.get_field("relative_path").is_some());
+/// assert!(s.get_field("start_line").is_some());
+/// assert!(s.get_field("end_line").is_some());
+/// assert!(s.get_field("language").is_some());
+/// ```
 fn schema() -> Schema {
     let mut builder = Schema::builder();
     builder.add_text_field("id", STRING | STORED);
