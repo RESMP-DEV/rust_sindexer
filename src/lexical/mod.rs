@@ -6,8 +6,8 @@ use std::time::Instant;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::{
-    Field, IndexRecordOption, OwnedValue, Schema, TantivyDocument, TextFieldIndexing, TextOptions,
-    FAST, INDEXED, STORED, STRING,
+    Field, IndexRecordOption, Schema, TantivyDocument, TextFieldIndexing, TextOptions, Value, FAST,
+    INDEXED, STORED, STRING,
 };
 use tantivy::{Index, IndexReader, IndexWriter, Term};
 use tracing::debug;
@@ -164,8 +164,9 @@ impl LexicalIndex {
             .parse_query(query)
             .context("failed to parse lexical search query")?;
         let searcher = self.reader.searcher();
+        let collector = TopDocs::with_limit(limit).order_by_score();
         let top_docs = searcher
-            .search(&parsed_query, &TopDocs::with_limit(limit))
+            .search(&parsed_query, &collector)
             .context("failed to search lexical index")?;
 
         tracing::debug!(
@@ -249,17 +250,12 @@ impl LexicalFields {
 }
 
 fn string_value(doc: &TantivyDocument, field: Field) -> Option<String> {
-    match doc.get_first(field) {
-        Some(OwnedValue::Str(value)) => Some(value.clone()),
-        _ => None,
-    }
+    doc.get_first(field)
+        .and_then(|value| value.as_str().map(ToString::to_string))
 }
 
 fn u64_value(doc: &TantivyDocument, field: Field) -> Option<u64> {
-    match doc.get_first(field) {
-        Some(OwnedValue::U64(value)) => Some(*value),
-        _ => None,
-    }
+    doc.get_first(field).and_then(|value| value.as_u64())
 }
 
 fn schema() -> Schema {
