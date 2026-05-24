@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tantivy::collector::TopDocs;
+use tantivy::merge_policy::NoMergePolicy;
 use tantivy::query::QueryParser;
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TantivyDocument, TextFieldIndexing, TextOptions, Value, FAST,
@@ -73,9 +74,7 @@ impl LexicalIndex {
     }
 
     pub fn writer(&self, heap_size_bytes: usize) -> Result<IndexWriter> {
-        self.index
-            .writer::<TantivyDocument>(heap_size_bytes)
-            .context("failed to create lexical index writer")
+        lexical_writer(&self.index, heap_size_bytes)
     }
 
     pub fn insert_chunks(&self, chunks: &[CodeChunk]) -> Result<()> {
@@ -91,10 +90,7 @@ impl LexicalIndex {
         tracing::debug!(chunks = chunks.len(), "Inserting chunks into lexical index");
 
         let fields = LexicalFields::new(self.index.schema())?;
-        let mut writer = self
-            .index
-            .writer::<TantivyDocument>(50_000_000)
-            .context("failed to create lexical index writer")?;
+        let mut writer = self.writer(50_000_000)?;
 
         for chunk in chunks {
             let mut doc = TantivyDocument::default();
@@ -134,10 +130,7 @@ impl LexicalIndex {
             "Deleting paths from lexical index"
         );
         let fields = LexicalFields::new(self.index.schema())?;
-        let mut writer = self
-            .index
-            .writer::<TantivyDocument>(50_000_000)
-            .context("failed to create lexical index writer")?;
+        let mut writer = self.writer(50_000_000)?;
 
         for relative_path in relative_paths {
             writer.delete_term(Term::from_field_text(fields.relative_path, relative_path));
@@ -200,10 +193,7 @@ impl LexicalIndex {
 
     pub fn clear(&self) -> Result<()> {
         tracing::info!("Clearing lexical index");
-        let mut writer = self
-            .index
-            .writer::<TantivyDocument>(50_000_000)
-            .context("failed to create lexical index writer")?;
+        let mut writer = self.writer(50_000_000)?;
         writer
             .delete_all_documents()
             .context("failed to delete all lexical index documents")?;
@@ -213,6 +203,14 @@ impl LexicalIndex {
             .context("failed to reload lexical index reader")?;
         Ok(())
     }
+}
+
+fn lexical_writer(index: &Index, heap_size_bytes: usize) -> Result<IndexWriter> {
+    let writer = index
+        .writer::<TantivyDocument>(heap_size_bytes)
+        .context("failed to create lexical index writer")?;
+    writer.set_merge_policy(Box::new(NoMergePolicy));
+    Ok(writer)
 }
 
 struct LexicalFields {
@@ -352,6 +350,14 @@ mod tests {
         let repo_dir = TempDir::new().unwrap();
         let index = LexicalIndex::create(repo_dir.path()).unwrap();
         (cache_lock, cache_dir, repo_dir, index)
+    }
+
+    #[test]
+    fn test_writer_disables_automatic_merges() {
+        let (_home_lock, _home_dir, _repo_dir, index) = test_index();
+        let writer = index.writer(50_000_000).unwrap();
+
+        assert_eq!(format!("{:?}", writer.get_merge_policy()), "NoMergePolicy");
     }
 
     #[test]

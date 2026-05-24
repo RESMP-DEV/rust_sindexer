@@ -21,6 +21,9 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ### Fixed
 
+- Disabled Tantivy's automatic lexical-index merge policy for sindexer-owned
+  writers so large incremental refreshes cannot abort the MCP process with a
+  merge-worker stack overflow.
 - Pinned `tantivy` to `0.26.1` so the lexical-index dependency chain resolves
   to a patched `lru` release instead of the vulnerable `0.12.x` line flagged
   by Dependabot.
