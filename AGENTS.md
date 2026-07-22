@@ -64,7 +64,7 @@ When embeddings are disabled, the pipeline stops after splitting and only popula
 
 Supported AST languages: Python, JavaScript, TypeScript, TSX, Rust, Go, Java, C++, C, Ruby, PHP, Swift, Scala, C#
 
-**Embedder** (`src/embedding/mod.rs`) — `Embedder` enum: `Http(EmbeddingClient)` for OpenAI-compatible APIs, or `Disabled` for lexical-only mode. Auto-detected from `EMBEDDING_URL` or `OPENAI_BASE_URL`. Batches 100 texts per request. Empty env vars treated as unset.
+**Embedder** (`src/embedding/mod.rs`) — `Embedder` enum: `Http(EmbeddingClient)` for OpenAI-compatible APIs, or `Disabled` for lexical-only mode. Auto-detected from `EMBEDDING_URL` or `OPENAI_BASE_URL`. Batches 32 texts per request by default (`BATCH_SIZE`). Empty env vars treated as unset.
 
 **Vector Store** (`src/vectordb/`) — `VectorStore` enum: `Local(LocalStore)` for brute-force in-memory cosine similarity with JSON disk persistence (~75MB for 50K chunks at 384-dim), or `Milvus(MilvusClient)` for remote Milvus/Zilliz Cloud. Auto-detected from `MILVUS_URL` or `MILVUS_ADDRESS`.
 
@@ -94,6 +94,9 @@ Supported AST languages: Python, JavaScript, TypeScript, TSX, Rust, Go, Java, C+
 - **search_code** — hybrid search (semantic + lexical) over indexed codebase
 - **get_indexing_status** — check indexing progress
 - **clear_index** — remove indexed data (vector + lexical)
+- **list_collections** — list vector collections with row counts
+- **collection_stats** — row count for a specific collection
+- **drop_collection** — permanently delete a collection by name
 
 ## Environment Variables
 
@@ -106,7 +109,7 @@ All optional. The server works with zero configuration.
 - `MILVUS_URL` — Milvus/Zilliz Cloud endpoint. Setting this uses Milvus instead of the local vector store. `MILVUS_ADDRESS` is also accepted.
 - `MILVUS_TOKEN` — Authentication token for Milvus/Zilliz.
 - `MAX_FILE_SIZE` — Maximum file size in bytes (default: `1048576`, 1MB).
-- `LOG_LEVEL` — Logging verbosity: trace/debug/info/warn/error (default: `info`).
+- `RUST_LOG` — Standard tracing filter (default level: `info`); logs go to stderr.
 
 ## Tests
 
