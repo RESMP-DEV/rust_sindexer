@@ -205,39 +205,36 @@ async fn run_index_codebase(
                     full_reindex = true;
                 }
 
-                if diff.is_empty() {
-                    if !full_reindex {
-                        let previous_status =
-                            previous_status_before_index.clone().unwrap_or_default();
-                        let vectors_inserted = if embeddings_enabled {
-                            vector_row_count(state, &collection_name)
-                                .await
-                                .unwrap_or(previous_status.vectors_inserted)
-                        } else {
-                            0
-                        };
-                        {
-                            let mut status = state.indexing_status.write().await;
-                            status.total_files = total_files;
-                        }
-                        update_status_completed_counts(
-                            state,
-                            path,
-                            previous_status.total_chunks,
-                            previous_status.embeddings_generated,
-                            vectors_inserted,
-                        )
-                        .await;
-                        return Ok(IndexResult {
-                            files_processed: 0,
-                            chunks_created: 0,
-                            embeddings_generated: 0,
-                            vectors_inserted,
-                            duration_ms: start.elapsed().as_millis() as u64,
-                            warnings: vec!["already up to date".to_string()],
-                            lexical_only: !embeddings_enabled,
-                        });
+                if diff.is_empty() && !full_reindex {
+                    let previous_status = previous_status_before_index.clone().unwrap_or_default();
+                    let vectors_inserted = if embeddings_enabled {
+                        vector_row_count(state, &collection_name)
+                            .await
+                            .unwrap_or(previous_status.vectors_inserted)
+                    } else {
+                        0
+                    };
+                    {
+                        let mut status = state.indexing_status.write().await;
+                        status.total_files = total_files;
                     }
+                    update_status_completed_counts(
+                        state,
+                        path,
+                        previous_status.total_chunks,
+                        previous_status.embeddings_generated,
+                        vectors_inserted,
+                    )
+                    .await;
+                    return Ok(IndexResult {
+                        files_processed: 0,
+                        chunks_created: 0,
+                        embeddings_generated: 0,
+                        vectors_inserted,
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        warnings: vec!["already up to date".to_string()],
+                        lexical_only: !embeddings_enabled,
+                    });
                 }
 
                 if !full_reindex {
@@ -707,7 +704,7 @@ async fn embed_chunks_lossy(
         let texts: Vec<String> = batch.iter().map(|chunk| chunk.content.clone()).collect();
         match embedder.embed_batch(&texts).await {
             Ok(embeddings) if embeddings.len() == batch_size => {
-                embedded_chunks.extend(batch.into_iter().zip(embeddings.into_iter()));
+                embedded_chunks.extend(batch.into_iter().zip(embeddings));
             }
             Ok(embeddings) => {
                 let err = format!(
@@ -787,6 +784,7 @@ async fn vector_row_count(state: &IndexerState, collection_name: &str) -> Option
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan_vector_collection_reset(
     path: &Path,
     files: &[PathBuf],

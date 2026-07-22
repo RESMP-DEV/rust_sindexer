@@ -21,6 +21,9 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ### Fixed
 
+- Resolved new Rust 1.97 clippy lints (collapsible if, redundant
+  `.into_iter()`, manual `contains`, and an allowed too-many-arguments on an
+  internal helper) so the CI lint gate passes on current stable.
 - Disabled Tantivy's automatic lexical-index merge policy for sindexer-owned
   writers so large incremental refreshes cannot abort the MCP process with a
   merge-worker stack overflow.

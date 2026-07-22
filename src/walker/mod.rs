@@ -160,7 +160,7 @@ fn should_skip_path(root: &Path, path: &Path, ignore_patterns: &[String]) -> boo
         !pattern.is_empty()
             && !pattern.contains('/')
             && !pattern.contains('*')
-            && components.iter().any(|component| *component == pattern)
+            && components.contains(&pattern)
     })
 }
 
