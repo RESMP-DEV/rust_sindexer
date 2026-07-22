@@ -157,11 +157,11 @@ Empty values are treated as unset.
 **Tuning:**
 
 - `MAX_FILE_SIZE` — max file size to process in bytes (default: `1048576` / 1MB)
-- `CHUNK_SIZE` / `CHUNK_OVERLAP` — chunk size and overlap in characters (defaults: `512` / `64`)
+- `CHUNK_SIZE` — maximum chunk size in bytes (default: `512`)
+- `CHUNK_OVERLAP` — chunk overlap in characters, applied as whole lines at an assumed 80 characters per line (`CHUNK_OVERLAP / 80` lines). Values below `80` — including the default `64` — round down to zero overlap; set `160` for two lines of overlap, etc.
 - `BATCH_SIZE` — texts per embedding API request (default: `32`)
 - `INDEXING_CONCURRENCY` — max concurrent embedding/insert operations (default: `32`; `CONCURRENCY` is accepted as an alias)
 - `EMBEDDING_RPM` / `EMBEDDING_TPM` — client-side rate limits for the embedding API, enforced with token buckets plus retry/backoff on 429s (defaults: `400` requests/min, `1600000` tokens/min; `0` = unlimited)
-- `PARALLELISM` — threads for parallel walking and parsing (default: `0` = auto-detect)
 - `FOLLOW_SYMLINKS` — follow symbolic links during traversal (default: `false`)
 - `RUST_LOG` — standard tracing filter, e.g. `RUST_LOG=debug` (default level: `info`; logs go to stderr, keeping stdout clean for MCP)
 
