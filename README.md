@@ -2,6 +2,8 @@
 
 A high-performance Rust MCP server for semantic code indexing and search. Drop-in replacement for [`@zilliz/claude-context-mcp`](https://www.npmjs.com/package/@zilliz/claude-context-mcp) — single native binary, no Node.js required.
 
+Works with zero configuration: by default it serves BM25 lexical search backed by a local on-disk vector store. Set `EMBEDDING_URL` to enable semantic search, and `MILVUS_URL` to back it with Milvus/Zilliz Cloud at scale.
+
 ## Why rust_sindexer?
 
 The official JS-based Claude Context MCP has several pain points:
@@ -54,11 +56,15 @@ cargo install --path .
 
 The binary itself stays CPU-only and talks to embedding providers over HTTP, so the same build works on local laptops, infra boxes, and GPU-serving hosts.
 
-## Prerequisites
+## Operating modes
 
-### Embedding Provider
+- **Lexical only (default)** — no environment variables needed. BM25 keyword/symbol search over a Tantivy index. Good for exact matches and code navigation.
+- **Semantic + lexical** — set `EMBEDDING_URL`. Hybrid RRF fusion of semantic similarity and BM25. The local vector store handles project-scale indexes (roughly up to 50K chunks).
+- **Full scale** — set `EMBEDDING_URL` and `MILVUS_URL` to use Milvus/Zilliz Cloud as the vector backend for large deployments.
 
-Any service that speaks the OpenAI `/v1/embeddings` format:
+## Embedding provider (optional)
+
+Semantic search needs an embedding service — any service that speaks the OpenAI `/v1/embeddings` format:
 
 **Cloud providers:**
 
@@ -113,9 +119,9 @@ EMBEDDING_DIMENSION=384
 
 No API key is needed for local servers — just omit `EMBEDDING_API_KEY`.
 
-### Vector Database
+## Vector database (optional)
 
-Milvus for vector storage. Either managed or self-hosted:
+By default vectors persist to a local JSON store under `~/.cache/sindexer/` (or `$XDG_CACHE_HOME/sindexer/`) — no external database needed. For large deployments, point `MILVUS_URL` at Milvus, either managed or self-hosted:
 
 ```bash
 # Zilliz Cloud (managed Milvus, free tier available)
@@ -138,27 +144,43 @@ All configuration is via environment variables. Canonical names are preferred, a
 
 Empty values are treated as unset.
 
+**Connection:**
+
 - `EMBEDDING_URL` — embedding API base URL. When unset or empty, semantic search is disabled.
 - `EMBEDDING_API_KEY` — optional API key for the embedding endpoint (omit for local servers)
 - `EMBEDDING_MODEL` — model name to request (default: `all-minilm`)
 - `EMBEDDING_DIMENSION` — vector dimension (default: `384`). Must match your model's output.
 - `MILVUS_URL` — Milvus endpoint. When unset or empty, the local vector store is used.
 - `MILVUS_TOKEN` — optional Milvus auth token (omit for local unauthenticated instances)
+- `SINDEXER_COLLECTION_IDENTITY` — stable collection identity override so multiple hosts with different checkout paths can intentionally share one Milvus collection for the same codebase
+
+**Tuning:**
+
 - `MAX_FILE_SIZE` — max file size to process in bytes (default: `1048576` / 1MB)
-- `LOG_LEVEL` — trace/debug/info/warn/error (default: `info`)
+- `CHUNK_SIZE` / `CHUNK_OVERLAP` — chunk size and overlap in characters (defaults: `512` / `64`)
+- `BATCH_SIZE` — texts per embedding API request (default: `32`)
+- `INDEXING_CONCURRENCY` — max concurrent embedding/insert operations (default: `32`; `CONCURRENCY` is accepted as an alias)
+- `EMBEDDING_RPM` / `EMBEDDING_TPM` — client-side rate limits for the embedding API, enforced with token buckets plus retry/backoff on 429s (defaults: `400` requests/min, `1600000` tokens/min; `0` = unlimited)
+- `PARALLELISM` — threads for parallel walking and parsing (default: `0` = auto-detect)
+- `FOLLOW_SYMLINKS` — follow symbolic links during traversal (default: `false`)
+- `RUST_LOG` — standard tracing filter, e.g. `RUST_LOG=debug` (default level: `info`; logs go to stderr, keeping stdout clean for MCP)
 
 ## Usage
 
-### Global MCP (all tools — Claude Code, Codex, Copilot)
+### Claude Code (user scope)
 
-Add to `~/.mcp.json`:
+```bash
+claude mcp add claude-context --scope user -- /path/to/sindexer
+```
+
+Or add the server block to `~/.claude.json` directly:
 
 ```json
 {
   "mcpServers": {
     "claude-context": {
       "type": "stdio",
-      "command": "/path/to/rust_sindexer",
+      "command": "/path/to/sindexer",
       "args": [],
       "env": {
         "EMBEDDING_URL": "https://api.openai.com/v1",
@@ -173,23 +195,28 @@ Add to `~/.mcp.json`:
 }
 ```
 
-### Claude Code only
-
-Add to `~/.claude/mcp.json` instead.
+The `env` block is optional — with no environment variables the server runs in lexical-only mode.
 
 ### Project-level
 
-Add to `.mcp.json` in the project root.
+Add the same `mcpServers` block to `.mcp.json` in the project root.
+
+### Other MCP clients
+
+Any stdio MCP client (Codex, Copilot, Claude Desktop, etc.) works with the same command; declare it wherever that client configures MCP servers (e.g. `~/.codex/config.toml` for Codex).
 
 ### MCP Tools
 
-Once configured, the server exposes five core tools:
+Once configured, the server exposes eight tools:
 
 - **`index_codebase`** — Indexes a directory. It may perform an initial full build when no compatible index exists; pass `force: true` only when a full rebuild is intended. Poll `get_indexing_status` until the status becomes `completed` or `failed`.
 - **`update_index`** — Incrementally updates an existing compatible index by touching only changed/deleted files. It refuses to perform an initial or full rebuild if the manifest or backing collection is missing or incompatible.
-- **`search_code`** — Hybrid search (semantic + BM25 lexical) with Reciprocal Rank Fusion. Returns code chunks with file paths, line numbers, and relevance scores. If semantic search is unavailable but the lexical index exists, the server falls back to lexical-only results.
-- **`get_indexing_status`** — Check whether indexing is in progress, completed, or not started.
+- **`search_code`** — Hybrid search (semantic + BM25 lexical) with Reciprocal Rank Fusion. Returns code chunks with file paths, line numbers, and relevance scores. `limit` defaults to 10, and an optional `extensions` filter (e.g. `["rs", "py"]`) restricts results by file type. If semantic search is unavailable but the lexical index exists, the server falls back to lexical-only results.
+- **`get_indexing_status`** — Report the current state for a path: `idle`, `indexing`, `completed`, or `failed`, with progress counters.
 - **`clear_index`** — Remove all indexed data (vectors + lexical index) for a codebase.
+- **`list_collections`** — List all vector collections with row counts.
+- **`collection_stats`** — Row count for a specific collection.
+- **`drop_collection`** — Permanently delete a specific collection by name.
 
 ### MCP-specific behavior
 
@@ -242,7 +269,7 @@ The server name stays `claude-context` so existing tool references keep working.
   "mcpServers": {
     "claude-context": {
       "type": "stdio",
-      "command": "/path/to/rust_sindexer",
+      "command": "/path/to/sindexer",
       "args": [],
       "env": {
         "EMBEDDING_URL": "https://api.openai.com/v1",
@@ -277,21 +304,23 @@ The JS version uses different variable names. Here's the mapping:
 - `OPENAI_API_KEY` → `EMBEDDING_API_KEY` (still accepted directly for compatibility)
 - `OPENAI_BASE_URL` → `EMBEDDING_URL` (still accepted directly for compatibility)
 - `EMBEDDING_MODEL` → `EMBEDDING_MODEL` (same name)
-- (new) `EMBEDDING_DIMENSION` — required, must match your model's output dimension
+- (new) `EMBEDDING_DIMENSION` — defaults to `384`; must match your model's output dimension
 - `MILVUS_ADDRESS` → `MILVUS_URL` (still accepted directly for compatibility)
 - `MILVUS_TOKEN` → `MILVUS_TOKEN` (same name)
 
 ### What stays the same
 
-- Tool names: `index_codebase`, `update_index`, `search_code`, `get_indexing_status`, `clear_index`
+- Tool names: `index_codebase`, `search_code`, `get_indexing_status`, `clear_index`
 - Core parameters: `path`, `query`, `limit`, `force`
-- Config file locations: `~/.mcp.json`, `~/.claude/mcp.json`, `.mcp.json`
+- Project-level `.mcp.json` files
 
 ### What changes
 
+- New tools: `update_index`, `list_collections`, `collection_stats`, `drop_collection`
 - `extensionFilter: [".ts", ".py"]` becomes `extensions: ["ts", "py"]` (no dot prefix)
 - No `EMBEDDING_PROVIDER` selection — uses any OpenAI-compatible HTTP endpoint
 - No required `~/.context/.env` file — any environment injection mechanism works
+- Everything is optional — with no environment variables at all, the server still serves lexical search
 
 ## Architecture
 
@@ -317,8 +346,8 @@ The JS version uses different variable names. Here's the mapping:
                               ┌───────────────┼──────────────┐
                               │                              │
                      ┌────────▼────────┐           ┌────────▼────────┐
-                     │     Milvus      │           │    Tantivy      │
-                     │  (Vector Store) │           │   (BM25 Index)  │
+                     │  Vector Store   │           │    Tantivy      │
+                     │ (Local / Milvus)│           │   (BM25 Index)  │
                      └─────────────────┘           └─────────────────┘
                               │                              │
                               └──────────────┬───────────────┘
@@ -328,6 +357,12 @@ The JS version uses different variable names. Here's the mapping:
                                     └─────────────────┘
 ```
 
+## On-disk layout
+
+- `<repo>/.sindexer/index-manifest.json` — SHA-256 per-file manifest driving incremental updates
+- `<repo>/.sindexer/index-status.json` — persisted indexing status
+- `~/.cache/sindexer/` (or `$XDG_CACHE_HOME/sindexer/`) — Tantivy lexical indexes and local vector store persistence, keyed by codebase path
+
 ## Tests
 
 ```bash
@@ -335,6 +370,8 @@ cargo test              # All tests
 cargo test walker       # File discovery
 cargo test splitter     # AST parsing
 cargo test embedding    # Embedding client
+cargo test local        # Local vector store
+cargo test lexical      # BM25 search
 ```
 
 ## License

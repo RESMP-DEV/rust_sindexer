@@ -4,6 +4,18 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ## [Unreleased]
 
+### Documentation
+
+- Rewrote the README for accuracy: documented the zero-config lexical-only
+  default mode and local vector store, corrected the binary name to `sindexer`
+  in MCP config examples, replaced the nonexistent `LOG_LEVEL` variable with
+  `RUST_LOG`, listed all eight MCP tools (including `list_collections`,
+  `collection_stats`, and `drop_collection`), documented previously missing
+  environment variables (`CHUNK_SIZE`, `CHUNK_OVERLAP`, `BATCH_SIZE`,
+  `INDEXING_CONCURRENCY`, `EMBEDDING_RPM`, `EMBEDDING_TPM`, `PARALLELISM`,
+  `FOLLOW_SYMLINKS`, `SINDEXER_COLLECTION_IDENTITY`), fixed MCP config file
+  locations, and added an on-disk layout section.
+
 ### Added
 
 - Added the `update_index` MCP tool for incremental-only refreshes of an
