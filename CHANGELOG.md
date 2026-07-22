@@ -12,9 +12,10 @@ All notable changes to `rust_sindexer` will be documented in this file.
   `RUST_LOG`, listed all eight MCP tools (including `list_collections`,
   `collection_stats`, and `drop_collection`), documented previously missing
   environment variables (`CHUNK_SIZE`, `CHUNK_OVERLAP`, `BATCH_SIZE`,
-  `INDEXING_CONCURRENCY`, `EMBEDDING_RPM`, `EMBEDDING_TPM`, `PARALLELISM`,
+  `INDEXING_CONCURRENCY`, `EMBEDDING_RPM`, `EMBEDDING_TPM`,
   `FOLLOW_SYMLINKS`, `SINDEXER_COLLECTION_IDENTITY`), fixed MCP config file
-  locations, and added an on-disk layout section.
+  locations, and added an on-disk layout section. `PARALLELISM` is parsed but
+  not yet wired to the walker or rayon, so it stays undocumented.
 
 ### Added
 
