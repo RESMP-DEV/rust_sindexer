@@ -37,6 +37,25 @@ All notable changes to `rust_sindexer` will be documented in this file.
 - Resolved new Rust 1.97 clippy lints (collapsible if, redundant
   `.into_iter()`, manual `contains`, and an allowed too-many-arguments on an
   internal helper) so the CI lint gate passes on current stable.
+- Deduplicate semantic and lexical hits by canonicalizing the backend-specific
+  ID formats that Milvus and Tantivy expose for the same chunk.
+- Scoped `SINDEXER_COLLECTION_IDENTITY` with `SINDEXER_COLLECTION_ROOT` and
+  namespace separately indexed descendants by relative path, preventing
+  AlphaHENG, its nested projects, and unrelated repositories from aliasing and
+  overwriting one Milvus collection.
+- Reset the exact path-scoped collection during an intentional full rebuild
+  instead of relying on asynchronous per-path deletes that can leave stale
+  rows or inflated statistics.
+- Preserve the accepted Milvus `insertCount` when a fresh or updating Zilliz
+  collection is immediately searchable but its stats endpoint reports a
+  stale lower or higher row count.
+- Keep a completed nonzero local status authoritative instead of inflating it
+  from a stale higher shared-collection stats response after a rebuild.
+- Preserve that completed nonzero accepted-insert count during a no-op
+  `update_index` instead of replacing it with a lagging live stats response.
+- Treat an explicitly indexed codebase as the ignore-file boundary so an
+  ancestor `.contextignore` can exclude a child from an aggregate index without
+  making that child project unindexable on its own.
 - Disabled Tantivy's automatic lexical-index merge policy for sindexer-owned
   writers so large incremental refreshes cannot abort the MCP process with a
   merge-worker stack overflow.
@@ -50,9 +69,6 @@ All notable changes to `rust_sindexer` will be documented in this file.
 - Ignore `.sindexer`, `.rust_sindexer`, `.worktrees`, `agent_workspace`, and
   `logs` during file discovery so refreshes do not index generated metadata,
   local agent sandboxes, or runtime logs.
-- Avoid dropping a whole shared Milvus collection during full reindex when
-  `SINDEXER_COLLECTION_IDENTITY` is active; use targeted relative-path deletes
-  before reinserting local files instead.
 - Prevent forced AlphaHENG indexing runs from walking common generated or vendor
   directories, following symlinks by default, or processing files above the
   configured `MAX_FILE_SIZE`.

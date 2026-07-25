@@ -3,7 +3,7 @@
 //! Pipeline: walk → split (rayon) → embed (batched) → insert (streamed).
 //! When embeddings are disabled, only the lexical index is populated.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -21,9 +21,7 @@ use crate::lexical::LexicalIndex;
 use crate::splitter::CodeSplitter;
 use crate::types::{CodeChunk, EmbeddingVector, IndexState, IndexStatus};
 use crate::vectordb::client::milvus_id_for_chunk_id;
-use crate::vectordb::{
-    collection_name_from_path, shared_collection_identity_enabled, InsertRow, VectorStore,
-};
+use crate::vectordb::{collection_name_from_path, InsertRow, VectorStore};
 use crate::walker::CodeWalker;
 
 const EMBEDDING_BATCH_SIZE: usize = 32;
@@ -139,7 +137,6 @@ async fn run_index_codebase(
     info!("Starting codebase indexing at {}", path.display());
 
     let collection_name = collection_name_from_path(path);
-    let shared_collection_identity = shared_collection_identity_enabled();
     let index_inputs = IndexInputs::from_splitter_and_walker(
         state.splitter.config(),
         &state.walker.extensions,
@@ -208,9 +205,13 @@ async fn run_index_codebase(
                 if diff.is_empty() && !full_reindex {
                     let previous_status = previous_status_before_index.clone().unwrap_or_default();
                     let vectors_inserted = if embeddings_enabled {
-                        vector_row_count(state, &collection_name)
-                            .await
-                            .unwrap_or(previous_status.vectors_inserted)
+                        if let Some(count) = completed_vector_count(&previous_status) {
+                            count
+                        } else {
+                            vector_row_count(state, &collection_name)
+                                .await
+                                .unwrap_or(previous_status.vectors_inserted)
+                        }
                     } else {
                         0
                     };
@@ -281,20 +282,8 @@ async fn run_index_codebase(
         }
     }
 
-    let reset_vector_collection = plan_vector_collection_reset(
-        path,
-        &files,
-        &collection_name,
-        full_reindex,
-        embeddings_enabled,
-        shared_collection_identity,
-        &mut stale_relative_paths,
-        &mut warnings,
-    );
-
     if embeddings_enabled {
-        if let Err(e) = prepare_vector_index(state, &collection_name, reset_vector_collection).await
-        {
+        if let Err(e) = prepare_vector_index(state, &collection_name, full_reindex).await {
             update_status_failed(state, path).await;
             return Err(e).context("Failed to prepare vector collection");
         }
@@ -562,23 +551,21 @@ async fn run_index_codebase(
         return Err(e).context("Failed to update lexical index");
     }
 
-    let (embeddings_generated, mut vectors_inserted, mut embedding_warnings) =
-        match embedding_result {
-            Ok(counts) => counts,
-            Err(e) => {
-                update_status_failed(state, path).await;
-                return Err(e);
-            }
-        };
+    let (embeddings_generated, vectors_inserted, mut embedding_warnings) = match embedding_result {
+        Ok(counts) => counts,
+        Err(e) => {
+            update_status_failed(state, path).await;
+            return Err(e);
+        }
+    };
     warnings.append(&mut embedding_warnings);
     if embeddings_enabled {
         if let Some(row_count) = vector_row_count(state, &collection_name).await {
             if full_reindex && row_count != vectors_inserted {
                 warnings.push(format!(
-                    "Vector store reports {} rows after {} accepted insert responses",
+                    "Vector store stats report {} rows after {} accepted inserts; preserving the insert response count",
                     row_count, vectors_inserted
                 ));
-                vectors_inserted = row_count;
             }
         }
     }
@@ -784,35 +771,9 @@ async fn vector_row_count(state: &IndexerState, collection_name: &str) -> Option
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn plan_vector_collection_reset(
-    path: &Path,
-    files: &[PathBuf],
-    collection_name: &str,
-    full_reindex: bool,
-    embeddings_enabled: bool,
-    shared_collection_identity: bool,
-    stale_relative_paths: &mut Vec<String>,
-    warnings: &mut Vec<String>,
-) -> bool {
-    if !(full_reindex && embeddings_enabled && shared_collection_identity) {
-        return full_reindex;
-    }
-
-    *stale_relative_paths = files
-        .iter()
-        .map(|file_path| relative_path(path, file_path))
-        .collect();
-    warnings.push(
-        "Shared collection identity active; reindexing with relative-path deletes instead of dropping the collection"
-            .to_string(),
-    );
-    warn!(
-        collection = %collection_name,
-        path = %path.display(),
-        "Shared collection identity active; skipping full collection drop"
-    );
-    false
+fn completed_vector_count(status: &IndexStatus) -> Option<usize> {
+    (status.status == IndexState::Completed && status.vectors_inserted > 0)
+        .then_some(status.vectors_inserted)
 }
 
 fn checked_vector_row_count(row_count: u64) -> usize {
@@ -914,36 +875,34 @@ mod tests {
         handle: tokio::task::JoinHandle<()>,
     }
 
+    #[test]
+    fn test_completed_vector_count_preserves_nonzero_accepted_count() {
+        let completed = IndexStatus {
+            vectors_inserted: 33_345,
+            status: IndexState::Completed,
+            ..IndexStatus::default()
+        };
+        assert_eq!(completed_vector_count(&completed), Some(33_345));
+
+        let indexing = IndexStatus {
+            vectors_inserted: 33_345,
+            status: IndexState::Indexing,
+            ..IndexStatus::default()
+        };
+        assert_eq!(completed_vector_count(&indexing), None);
+        assert_eq!(
+            completed_vector_count(&IndexStatus {
+                status: IndexState::Completed,
+                ..IndexStatus::default()
+            }),
+            None
+        );
+    }
+
     impl MockHttpServer {
         async fn wait(self) {
             self.handle.await.unwrap();
         }
-    }
-
-    #[test]
-    fn test_shared_identity_full_reindex_plan_uses_relative_path_deletes() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path();
-        let files = vec![root.join("src/lib.rs"), root.join("README.md")];
-        let mut stale_relative_paths = Vec::new();
-        let mut warnings = Vec::new();
-
-        let reset_collection = plan_vector_collection_reset(
-            root,
-            &files,
-            "AlphaHENG_abc123",
-            true,
-            true,
-            true,
-            &mut stale_relative_paths,
-            &mut warnings,
-        );
-
-        assert!(!reset_collection);
-        assert_eq!(stale_relative_paths, vec!["src/lib.rs", "README.md"]);
-        assert!(warnings
-            .iter()
-            .any(|warning| warning.contains("relative-path deletes")));
     }
 
     async fn spawn_mock_milvus_server() -> MockHttpServer {
