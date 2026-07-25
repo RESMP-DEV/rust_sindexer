@@ -12,6 +12,7 @@ use std::path::Path;
 use tracing::{debug, info};
 
 const COLLECTION_IDENTITY_ENV: &str = "SINDEXER_COLLECTION_IDENTITY";
+const COLLECTION_ROOT_ENV: &str = "SINDEXER_COLLECTION_ROOT";
 
 /// Selects between a local brute-force vector store and a remote Milvus instance.
 pub enum VectorStore {
@@ -135,20 +136,44 @@ fn build_relative_path_milvus_filter(relative_paths: &[String]) -> String {
 ///
 /// By default, this function takes the last path component as a human-readable
 /// prefix, sanitizes it, and appends a truncated SHA-256 hash of the full path
-/// for uniqueness. Set `SINDEXER_COLLECTION_IDENTITY` to make multiple hosts
-/// with different checkout paths share the same backing collection.
+/// for uniqueness. Set `SINDEXER_COLLECTION_IDENTITY` together with
+/// `SINDEXER_COLLECTION_ROOT` to make multiple hosts with different checkout
+/// paths share stable, path-scoped collections. Descendant codebases append
+/// their path relative to the configured root so separate projects cannot
+/// alias the root collection or one another.
 pub fn collection_name_from_path(path: &Path) -> String {
     let identity = env::var(COLLECTION_IDENTITY_ENV).ok();
-    let identity = identity.as_deref().and_then(non_empty_trimmed);
-    collection_name_from_path_with_identity(path, identity)
+    let root = env::var(COLLECTION_ROOT_ENV).ok();
+    let identity = scoped_collection_identity(path, identity.as_deref(), root.as_deref());
+    collection_name_from_path_with_identity(path, identity.as_deref())
 }
 
-pub fn shared_collection_identity_enabled() -> bool {
-    env::var(COLLECTION_IDENTITY_ENV)
-        .ok()
-        .as_deref()
-        .and_then(non_empty_trimmed)
-        .is_some()
+fn scoped_collection_identity(
+    path: &Path,
+    identity: Option<&str>,
+    root: Option<&str>,
+) -> Option<String> {
+    let identity = identity.and_then(non_empty_trimmed)?;
+    let root = root.and_then(non_empty_trimmed)?;
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let root = Path::new(root)
+        .canonicalize()
+        .unwrap_or_else(|_| Path::new(root).to_path_buf());
+    let relative = path.strip_prefix(root).ok()?;
+
+    if relative.as_os_str().is_empty() {
+        Some(identity.to_string())
+    } else {
+        // Normalize to forward slashes so the identity is identical across
+        // hosts regardless of platform path separator (a Windows checkout
+        // must produce the same collection identity as macOS/Linux).
+        let relative_normalized = relative
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        Some(format!("{identity}/{relative_normalized}"))
+    }
 }
 
 fn collection_name_from_path_with_identity(path: &Path, identity: Option<&str>) -> String {
@@ -262,6 +287,62 @@ mod tests {
 
         assert_eq!(mac_name, linux_name);
         assert!(mac_name.starts_with("AlphaHENG_"));
+    }
+
+    #[test]
+    fn test_scoped_identity_keeps_root_stable_across_hosts() {
+        let identity = Some("AlphaHENG@nomic768");
+        let mac_path = PathBuf::from("/Users/kearm/AlphaHENG");
+        let linux_path = PathBuf::from("/home/kearm/AlphaHENG");
+
+        let mac_identity =
+            scoped_collection_identity(&mac_path, identity, Some("/Users/kearm/AlphaHENG"));
+        let linux_identity =
+            scoped_collection_identity(&linux_path, identity, Some("/home/kearm/AlphaHENG"));
+
+        assert_eq!(mac_identity, linux_identity);
+        assert_eq!(mac_identity.as_deref(), identity);
+    }
+
+    #[test]
+    fn test_scoped_identity_namespaces_nested_codebases() {
+        let identity = Some("AlphaHENG@nomic768");
+        let mac_path = PathBuf::from("/Users/kearm/AlphaHENG/contrib/gigatoken");
+        let linux_path = PathBuf::from("/home/kearm/AlphaHENG/contrib/gigatoken");
+
+        let mac_identity =
+            scoped_collection_identity(&mac_path, identity, Some("/Users/kearm/AlphaHENG"));
+        let linux_identity =
+            scoped_collection_identity(&linux_path, identity, Some("/home/kearm/AlphaHENG"));
+
+        assert_eq!(mac_identity, linux_identity);
+        assert_eq!(
+            mac_identity.as_deref(),
+            Some("AlphaHENG@nomic768/contrib/gigatoken")
+        );
+        let collection =
+            collection_name_from_path_with_identity(&mac_path, mac_identity.as_deref());
+        assert!(collection.starts_with("gigatoken_"));
+    }
+
+    #[test]
+    fn test_scoped_identity_does_not_escape_configured_root() {
+        let path = PathBuf::from("/Users/kearm/PrismML-Bonsai-MLX-Metal");
+        let identity = scoped_collection_identity(
+            &path,
+            Some("AlphaHENG@nomic768"),
+            Some("/Users/kearm/AlphaHENG"),
+        );
+
+        assert!(identity.is_none());
+    }
+
+    #[test]
+    fn test_scoped_identity_requires_a_root() {
+        let path = PathBuf::from("/Users/kearm/AlphaHENG");
+        let identity = scoped_collection_identity(&path, Some("AlphaHENG@nomic768"), None);
+
+        assert!(identity.is_none());
     }
 
     #[test]

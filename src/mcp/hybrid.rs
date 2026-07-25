@@ -1,4 +1,5 @@
 use crate::types::CodeChunk;
+use crate::vectordb::client::milvus_id_for_chunk_id;
 use std::collections::HashMap;
 use tracing::{debug, info};
 
@@ -101,12 +102,16 @@ fn merge_ranked_hits(fused: &mut HashMap<String, HybridHit>, hits: Vec<HybridHit
 
 fn hit_key(chunk: &CodeChunk) -> String {
     if !chunk.id.is_empty() {
-        return chunk.id.clone();
+        let canonical_id = chunk
+            .id
+            .parse::<i64>()
+            .unwrap_or_else(|_| milvus_id_for_chunk_id(&chunk.id));
+        return format!("id:{canonical_id}");
     }
 
     format!(
-        "{}:{}:{}:{}",
-        chunk.relative_path, chunk.start_line, chunk.end_line, chunk.language
+        "{}:{}:{}:{}:{}",
+        chunk.relative_path, chunk.start_line, chunk.end_line, chunk.language, chunk.content
     )
 }
 
@@ -114,6 +119,7 @@ fn hit_key(chunk: &CodeChunk) -> String {
 mod tests {
     use super::{fuse_hybrid_hits, HybridFusionOptions, HybridHit};
     use crate::types::CodeChunk;
+    use crate::vectordb::client::milvus_id_for_chunk_id;
     use std::path::PathBuf;
 
     fn hit(
@@ -154,6 +160,27 @@ mod tests {
 
         assert_eq!(fused.len(), 1);
         assert_eq!(fused[0].chunk.id, "chunk-1");
+        assert_eq!(fused[0].chunk.file_path, PathBuf::from("/repo/src/lib.rs"));
+    }
+
+    #[test]
+    fn test_fuse_hybrid_hits_merges_backend_specific_id_formats() {
+        let lexical_id = "src/lib.rs:10:stable-hash";
+        let semantic_id = milvus_id_for_chunk_id(lexical_id).to_string();
+        let semantic = hit(&semantic_id, "src/lib.rs", "/repo/src/lib.rs", 10, 0.9);
+        let lexical = hit(lexical_id, "src/lib.rs", "", 10, 12.0);
+
+        let fused = fuse_hybrid_hits(
+            "lib",
+            vec![semantic],
+            vec![lexical],
+            &HybridFusionOptions {
+                limit: 10,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(fused.len(), 1);
         assert_eq!(fused[0].chunk.file_path, PathBuf::from("/repo/src/lib.rs"));
     }
 

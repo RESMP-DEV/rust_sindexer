@@ -64,6 +64,7 @@ impl CodeWalker {
 
         builder
             .hidden(true)
+            .parents(false)
             .follow_links(self.follow_symlinks)
             .git_ignore(true)
             .git_global(true)
