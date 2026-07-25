@@ -152,7 +152,8 @@ Empty values are treated as unset.
 - `EMBEDDING_DIMENSION` — vector dimension (default: `384`). Must match your model's output.
 - `MILVUS_URL` — Milvus endpoint. When unset or empty, the local vector store is used.
 - `MILVUS_TOKEN` — optional Milvus auth token (omit for local unauthenticated instances)
-- `SINDEXER_COLLECTION_IDENTITY` — stable collection identity override so multiple hosts with different checkout paths can intentionally share one Milvus collection for the same codebase
+- `SINDEXER_COLLECTION_IDENTITY` — stable collection namespace so multiple hosts can intentionally share collections for the same codebases; requires `SINDEXER_COLLECTION_ROOT`
+- `SINDEXER_COLLECTION_ROOT` — host-local root path governed by the stable identity. The root gets the identity directly, while separately indexed descendants append their relative paths and receive distinct collections. Paths outside the root use their own absolute-path identities.
 
 **Tuning:**
 

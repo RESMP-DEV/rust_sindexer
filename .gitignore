@@ -22,6 +22,7 @@ target
 
 # Local development / orchestration artifacts
 .DS_Store
+.sindexer/
 agent_workspace/
 logs/
 reports/

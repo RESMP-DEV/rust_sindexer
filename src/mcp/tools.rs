@@ -29,10 +29,7 @@ use crate::embedding::{Embedder, EmbeddingClient, EmbeddingConfig};
 use crate::lexical::LexicalIndex;
 use crate::splitter::{CodeSplitter, Config as SplitterConfig};
 use crate::types::{IndexState, IndexStatus};
-use crate::vectordb::{
-    collection_name_from_path, shared_collection_identity_enabled, LocalStore, MilvusClient,
-    VectorStore,
-};
+use crate::vectordb::{collection_name_from_path, LocalStore, MilvusClient, VectorStore};
 use crate::walker::CodeWalker;
 
 // ============================================================================
@@ -118,8 +115,7 @@ fn should_request_live_rows(status: &IndexStatus) -> bool {
     match status.status {
         IndexState::Idle => true,
         IndexState::Completed => {
-            shared_collection_identity_enabled()
-                || status.vectors_inserted == 0
+            status.vectors_inserted == 0
                 || status.embeddings_generated == 0
                 || status.total_chunks == 0
         }
@@ -132,7 +128,6 @@ fn can_apply_live_rows(status: &IndexStatus, requested_from_idle: bool) -> bool 
         IndexState::Idle => true,
         IndexState::Completed => {
             requested_from_idle
-                || shared_collection_identity_enabled()
                 || status.vectors_inserted == 0
                 || status.embeddings_generated == 0
                 || status.total_chunks == 0
@@ -1013,6 +1008,21 @@ mod tests {
     }
 
     #[test]
+    fn test_completed_nonzero_status_does_not_request_live_rows() {
+        let status = IndexStatus {
+            total_files: 1274,
+            processed_files: 1274,
+            total_chunks: 33345,
+            embeddings_generated: 33345,
+            vectors_inserted: 33345,
+            status: IndexState::Completed,
+        };
+
+        assert!(!should_request_live_rows(&status));
+        assert!(!can_apply_live_rows(&status, false));
+    }
+
+    #[test]
     fn test_index_params_default_force() {
         let json = r#"{"path": "/tmp/test"}"#;
         let params: IndexCodebaseParams = serde_json::from_str(json).unwrap();
@@ -1228,8 +1238,15 @@ mod tests {
                         "code": 0
                     }),
                 ),
+                (
+                    "/v2/vectordb/collections/get_stats",
+                    serde_json::json!({
+                        "code": 0,
+                        "data": {"rowCount": 0}
+                    }),
+                ),
             ]),
-            8,
+            9,
         )
         .await;
         let embedding = spawn_mock_embedding_server(serde_json::json!({
@@ -1287,6 +1304,8 @@ mod tests {
         assert_eq!(status.status, crate::types::IndexState::Completed);
         assert_eq!(status.processed_files, 1);
         assert_eq!(status.total_chunks, 1);
+        assert_eq!(status.embeddings_generated, 1);
+        assert_eq!(status.vectors_inserted, 1);
 
         embedding.wait().await;
         milvus.wait().await;

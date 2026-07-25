@@ -283,6 +283,21 @@ async fn test_respects_contextignore_file_patterns() {
 }
 
 #[tokio::test]
+async fn test_explicit_codebase_root_ignores_parent_contextignore() {
+    let temp = TempDir::new().unwrap();
+
+    create_file(&temp, ".contextignore", "contrib/rust_sindexer/\n");
+    let src_main = create_file(&temp, "contrib/rust_sindexer/src/main.rs", "fn main() {}");
+    let codebase = temp.path().join("contrib/rust_sindexer");
+
+    let walker = CodeWalker::new();
+    let paths = walker.walk(&codebase).await.unwrap();
+
+    assert_eq!(paths.len(), 1);
+    assert!(paths.contains(&src_main));
+}
+
+#[tokio::test]
 async fn test_code_walker_applies_default_ignore_components() {
     let temp = TempDir::new().unwrap();
 
