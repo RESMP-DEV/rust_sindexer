@@ -498,7 +498,13 @@ mod tests {
         let server = tokio::spawn(async move {
             let mut bodies = Vec::new();
             for _ in 0..3 {
-                let (mut stream, _) = listener.accept().await.unwrap();
+                let (mut stream, _) =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept())
+                        .await
+                        .map_err(|error| {
+                            format!("timed out waiting for embedding request: {error}")
+                        })?
+                        .map_err(|error| format!("failed to accept embedding request: {error}"))?;
                 let mut request = Vec::new();
                 let mut buffer = [0_u8; 4096];
                 let header_end = loop {
@@ -506,22 +512,34 @@ mod tests {
                     {
                         break position + 4;
                     }
-                    let read = stream.read(&mut buffer).await.unwrap();
-                    assert!(read > 0, "request ended before its headers");
+                    let read = stream
+                        .read(&mut buffer)
+                        .await
+                        .map_err(|error| format!("failed to read request headers: {error}"))?;
+                    if read == 0 {
+                        return Err("request ended before its headers".to_string());
+                    }
                     request.extend_from_slice(&buffer[..read]);
                 };
-                let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                let headers = std::str::from_utf8(&request[..header_end])
+                    .map_err(|error| format!("request headers were not UTF-8: {error}"))?;
                 let content_length = headers
                     .lines()
                     .find_map(|line| {
                         let (name, value) = line.split_once(':')?;
                         name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().unwrap())
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
                     })
-                    .unwrap();
+                    .ok_or_else(|| "missing or malformed Content-Length".to_string())?;
                 while request.len() < header_end + content_length {
-                    let read = stream.read(&mut buffer).await.unwrap();
-                    assert!(read > 0, "request ended before its body");
+                    let read = stream
+                        .read(&mut buffer)
+                        .await
+                        .map_err(|error| format!("failed to read request body: {error}"))?;
+                    if read == 0 {
+                        return Err("request ended before its body".to_string());
+                    }
                     request.extend_from_slice(&buffer[..read]);
                 }
                 let body: serde_json::Value =
@@ -540,9 +558,9 @@ mod tests {
                 );
                 stream.write_all(headers.as_bytes()).await.unwrap();
                 stream.write_all(&response).await.unwrap();
-                stream.shutdown().await.unwrap();
+                let _ = stream.shutdown().await;
             }
-            bodies
+            Ok::<_, String>(bodies)
         });
 
         let endpoint = format!("http://{address}/v1/embeddings");
@@ -566,7 +584,7 @@ mod tests {
         });
         unprefixed.embed_batch(&["plain".into()]).await.unwrap();
 
-        let bodies = server.await.unwrap();
+        let bodies = server.await.unwrap().unwrap();
         assert_eq!(bodies[0]["input"], serde_json::json!(["query:\nneedle"]));
         assert_eq!(
             bodies[1]["input"],
