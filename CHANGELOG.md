@@ -6,6 +6,16 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ### Documentation
 
+- Restructured the README for first-time users: added a plain-language
+  project description, feature highlights, prebuilt-binary installation
+  instructions (GitHub Releases), a prominent Quickstart, an MCP tool
+  reference table with parameters, search examples, a "Building from source
+  & development" section with project layout, and a Troubleshooting & FAQ
+  section covering the most common failure modes.
+- Added an `examples/` directory: ready-to-edit `mcp-servers.json` configs
+  (zero-config and semantic variants) and `demo.sh`, a self-contained
+  end-to-end smoke test that drives the server over raw stdio JSON-RPC
+  without an MCP client.
 - Rewrote the README for accuracy: documented the zero-config lexical-only
   default mode and local vector store, corrected the binary name to `sindexer`
   in MCP config examples, replaced the nonexistent `LOG_LEVEL` variable with
@@ -19,6 +29,10 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ### Added
 
+- The binary now accepts `-h`/`--help` and `-V`/`--version`, printing usage
+  (with MCP registration examples) and the crate version respectively.
+  Unknown arguments are still ignored, so existing MCP client launches are
+  unaffected.
 - Added the `update_index` MCP tool for incremental-only refreshes of an
   existing compatible codebase index. It touches only changed/deleted files and
   fails instead of falling back to a full rebuild when the manifest or backing
