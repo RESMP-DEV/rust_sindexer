@@ -49,6 +49,10 @@ pub struct Config {
     pub embedding_model: String,
     /// Optional API key for embedding providers that require bearer auth.
     pub embedding_api_key: Option<String>,
+    /// Prefix prepended to semantic search queries before embedding.
+    pub embedding_query_prefix: String,
+    /// Prefix prepended to indexed code passages before embedding.
+    pub embedding_passage_prefix: String,
     /// URL for Milvus vector database. Empty uses the local vector store.
     pub milvus_url: String,
     /// Optional bearer token for authenticated Milvus-compatible endpoints.
@@ -81,6 +85,8 @@ impl Default for Config {
             embedding_url: String::new(),
             embedding_model: "all-minilm".to_string(),
             embedding_api_key: None,
+            embedding_query_prefix: String::new(),
+            embedding_passage_prefix: String::new(),
             milvus_url: String::new(),
             milvus_token: None,
             chunk_size: 512,
@@ -108,6 +114,10 @@ impl Config {
             embedding_model: first_non_empty_env(&["EMBEDDING_MODEL"])
                 .unwrap_or(defaults.embedding_model),
             embedding_api_key: first_non_empty_env(EMBEDDING_API_KEY_ENV_KEYS),
+            embedding_query_prefix: preserving_whitespace_env("EMBEDDING_QUERY_PREFIX")
+                .unwrap_or(defaults.embedding_query_prefix),
+            embedding_passage_prefix: preserving_whitespace_env("EMBEDDING_PASSAGE_PREFIX")
+                .unwrap_or(defaults.embedding_passage_prefix),
             milvus_url: first_non_empty_env(MILVUS_URL_ENV_KEYS).unwrap_or(defaults.milvus_url),
             milvus_token: first_non_empty_env(&["MILVUS_TOKEN"]),
             chunk_size: env::var("CHUNK_SIZE")
@@ -237,6 +247,10 @@ fn first_non_empty_env(keys: &[&str]) -> Option<String> {
     })
 }
 
+fn preserving_whitespace_env(key: &str) -> Option<String> {
+    env::var(key).ok().filter(|value| !value.trim().is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,6 +263,8 @@ mod tests {
         "OPENAI_BASE_URL",
         "EMBEDDING_API_KEY",
         "OPENAI_API_KEY",
+        "EMBEDDING_QUERY_PREFIX",
+        "EMBEDDING_PASSAGE_PREFIX",
         "MILVUS_URL",
         "MILVUS_ADDRESS",
         "MILVUS_TOKEN",
@@ -329,6 +345,26 @@ mod tests {
         assert_eq!(config.milvus_url, "https://cluster.zillizcloud.com:443");
         assert!(config.has_embedding_url());
         assert!(config.has_milvus_url());
+    }
+
+    #[test]
+    fn from_env_preserves_embedding_prefix_whitespace() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::new(&[
+            (
+                "EMBEDDING_QUERY_PREFIX",
+                Some("Find the most relevant code snippet given the following query:\n"),
+            ),
+            (
+                "EMBEDDING_PASSAGE_PREFIX",
+                Some("Candidate code snippet:\n"),
+            ),
+        ]);
+
+        let config = Config::from_env();
+
+        assert!(config.embedding_query_prefix.ends_with('\n'));
+        assert!(config.embedding_passage_prefix.ends_with('\n'));
     }
 
     #[test]

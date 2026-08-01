@@ -1254,6 +1254,8 @@ mod tests {
                 model: "test".to_string(),
                 batch_size: 100,
                 api_key: None,
+                query_prefix: String::new(),
+                passage_prefix: String::new(),
             })),
             VectorStore::Milvus(MilvusClient::new(milvus_url, None)),
             dimension,

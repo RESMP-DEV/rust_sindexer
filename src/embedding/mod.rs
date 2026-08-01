@@ -17,6 +17,7 @@ struct TokenBucket {
     tokens: f64,
     refill_rate: f64, // tokens per second
     last_refill: Instant,
+    unlimited: bool,
 }
 
 impl TokenBucket {
@@ -27,6 +28,7 @@ impl TokenBucket {
             tokens: per_minute,
             refill_rate,
             last_refill: Instant::now(),
+            unlimited: per_minute == 0.0,
         }
     }
 
@@ -38,6 +40,9 @@ impl TokenBucket {
     }
 
     fn try_acquire(&mut self, cost: f64) -> Option<std::time::Duration> {
+        if self.unlimited {
+            return None;
+        }
         self.refill();
         if self.tokens >= cost {
             self.tokens -= cost;
@@ -111,6 +116,10 @@ pub struct EmbeddingConfig {
     pub batch_size: usize,
     /// Optional API key for providers that require bearer auth.
     pub api_key: Option<String>,
+    /// Prefix applied to individual search queries.
+    pub query_prefix: String,
+    /// Prefix applied to batches of indexed passages.
+    pub passage_prefix: String,
 }
 
 impl Default for EmbeddingConfig {
@@ -120,6 +129,8 @@ impl Default for EmbeddingConfig {
             model: "all-minilm".to_string(),
             batch_size: 100,
             api_key: None,
+            query_prefix: String::new(),
+            passage_prefix: String::new(),
         }
     }
 }
@@ -139,6 +150,8 @@ impl EmbeddingConfig {
             model: config.embedding_model.clone(),
             batch_size: config.batch_size,
             api_key: config.embedding_api_key.clone(),
+            query_prefix: config.embedding_query_prefix.clone(),
+            passage_prefix: config.embedding_passage_prefix.clone(),
         }
     }
 }
@@ -208,8 +221,8 @@ impl EmbeddingClient {
 
     /// Generates an embedding for a single text.
     pub async fn embed(&self, text: &str) -> Result<EmbeddingVector> {
-        let texts = vec![text.to_string()];
-        let mut results = self.embed_batch(&texts).await?;
+        let texts = vec![format!("{}{}", self.config.query_prefix, text)];
+        let mut results = self.embed_texts(&texts).await?;
 
         results
             .pop()
@@ -218,6 +231,14 @@ impl EmbeddingClient {
 
     /// Generates embeddings for multiple texts in batches.
     pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<EmbeddingVector>> {
+        let texts = texts
+            .iter()
+            .map(|text| format!("{}{}", self.config.passage_prefix, text))
+            .collect::<Vec<_>>();
+        self.embed_texts(&texts).await
+    }
+
+    async fn embed_texts(&self, texts: &[String]) -> Result<Vec<EmbeddingVector>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
@@ -387,6 +408,8 @@ mod tests {
         assert_eq!(config.model, "all-minilm");
         assert_eq!(config.batch_size, 100);
         assert_eq!(config.api_key, None);
+        assert_eq!(config.query_prefix, "");
+        assert_eq!(config.passage_prefix, "");
     }
 
     #[test]
@@ -395,6 +418,8 @@ mod tests {
             embedding_url: "https://api.openai.com/v1".to_string(),
             embedding_model: "text-embedding-3-small".to_string(),
             embedding_api_key: Some("secret".to_string()),
+            embedding_query_prefix: "query: ".to_string(),
+            embedding_passage_prefix: "passage: ".to_string(),
             batch_size: 32,
             ..Config::default()
         };
@@ -405,5 +430,18 @@ mod tests {
         assert_eq!(config.model, "text-embedding-3-small");
         assert_eq!(config.batch_size, 32);
         assert_eq!(config.api_key.as_deref(), Some("secret"));
+        assert_eq!(config.query_prefix, "query: ");
+        assert_eq!(config.passage_prefix, "passage: ");
+    }
+
+    #[tokio::test]
+    async fn zero_rate_limits_are_unlimited() {
+        let limiter = RateLimiter::new(0, 0);
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            limiter.acquire(u64::MAX),
+        )
+        .await
+        .expect("zero limits must not wait or panic");
     }
 }

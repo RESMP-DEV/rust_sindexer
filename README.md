@@ -233,6 +233,8 @@ Empty values are treated as unset. Compatibility aliases are accepted:
 | `EMBEDDING_API_KEY` | unset | API key for the embedding endpoint. Omit for local servers. |
 | `EMBEDDING_MODEL` | `all-minilm` | Model name to request. |
 | `EMBEDDING_DIMENSION` | `384` | Vector dimension. **Must match your model's output.** |
+| `EMBEDDING_QUERY_PREFIX` | unset | Optional text prepended to semantic search queries; whitespace is preserved. |
+| `EMBEDDING_PASSAGE_PREFIX` | unset | Optional text prepended to indexed code chunks; whitespace is preserved. |
 | `MILVUS_URL` | unset | Milvus/Zilliz endpoint. When unset, the local vector store is used. |
 | `MILVUS_TOKEN` | unset | Milvus/Zilliz auth token. Omit for local unauthenticated instances. |
 | `SINDEXER_COLLECTION_IDENTITY` | unset | Stable collection namespace so multiple hosts can intentionally share collections for the same codebase. Requires `SINDEXER_COLLECTION_ROOT`. |
@@ -292,6 +294,13 @@ EMBEDDING_DIMENSION=768
 EMBEDDING_URL=http://localhost:8000/v1
 EMBEDDING_MODEL=BAAI/bge-base-en-v1.5
 EMBEDDING_DIMENSION=768
+
+# Native RESMP.DEV calibrated Jina Code MXFP4 server
+EMBEDDING_URL=http://localhost:1235/v1
+EMBEDDING_MODEL=jina-code-embeddings-1.5b-block-gptq-mxfp4-32k
+EMBEDDING_DIMENSION=1536
+EMBEDDING_QUERY_PREFIX=$'Find the most relevant code snippet given the following query:\n'
+EMBEDDING_PASSAGE_PREFIX=$'Candidate code snippet:\n'
 ```
 
 ### Vector storage (optional)
