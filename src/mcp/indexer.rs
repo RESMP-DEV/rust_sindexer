@@ -143,6 +143,7 @@ async fn run_index_codebase(
         &state.walker.ignore_patterns,
         state.walker.max_file_size,
         state.walker.follow_symlinks,
+        state.embedder.passage_prefix(),
     );
 
     // Phase 1: Walk files

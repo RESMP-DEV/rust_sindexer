@@ -23,6 +23,8 @@ pub struct IndexInputs {
     pub max_file_size: u64,
     #[serde(default)]
     pub follow_symlinks: bool,
+    #[serde(default)]
+    pub embedding_passage_prefix_sha256: String,
 }
 
 fn default_max_file_size() -> u64 {
@@ -36,6 +38,7 @@ impl IndexInputs {
         ignore_patterns: &[String],
         max_file_size: u64,
         follow_symlinks: bool,
+        embedding_passage_prefix: &str,
     ) -> Self {
         Self {
             chunk_size: splitter.max_chunk_bytes,
@@ -46,6 +49,11 @@ impl IndexInputs {
             ignore_patterns: ignore_patterns.to_vec(),
             max_file_size,
             follow_symlinks,
+            embedding_passage_prefix_sha256: if embedding_passage_prefix.is_empty() {
+                String::new()
+            } else {
+                format!("{:x}", Sha256::digest(embedding_passage_prefix.as_bytes()))
+            },
         }
     }
 }
@@ -288,6 +296,7 @@ mod tests {
             ignore_patterns: vec!["target".into()],
             max_file_size: 1024 * 1024,
             follow_symlinks: false,
+            embedding_passage_prefix_sha256: String::new(),
         };
 
         let previous = IndexManifest {
@@ -331,6 +340,7 @@ mod tests {
             ignore_patterns: vec!["target".into()],
             max_file_size: 1024 * 1024,
             follow_symlinks: false,
+            embedding_passage_prefix_sha256: String::new(),
         };
         let store = ManifestStore;
         let files = vec![src.join("lib.rs")];
@@ -364,6 +374,33 @@ mod tests {
 
         assert_eq!(manifest.inputs.max_file_size, 1024 * 1024);
         assert!(!manifest.inputs.follow_symlinks);
+        assert_eq!(manifest.inputs.embedding_passage_prefix_sha256, "");
+    }
+
+    #[test]
+    fn passage_prefix_changes_manifest_compatibility() {
+        let splitter = splitter::Config::default();
+        let extensions = vec!["rs".to_string()];
+        let ignore_patterns = vec!["target".to_string()];
+        let first = IndexInputs::from_splitter_and_walker(
+            &splitter,
+            &extensions,
+            &ignore_patterns,
+            1024 * 1024,
+            false,
+            "passage-a:\n",
+        );
+        let second = IndexInputs::from_splitter_and_walker(
+            &splitter,
+            &extensions,
+            &ignore_patterns,
+            1024 * 1024,
+            false,
+            "passage-b:\n",
+        );
+
+        assert_ne!(first.embedding_passage_prefix_sha256, "");
+        assert_ne!(first, second);
     }
 
     #[test]

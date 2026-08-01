@@ -48,6 +48,7 @@ fn default_inputs() -> IndexInputs {
         ignore_patterns: vec!["target".into()],
         max_file_size: 1024 * 1024,
         follow_symlinks: false,
+        embedding_passage_prefix_sha256: String::new(),
     }
 }
 
@@ -93,6 +94,7 @@ fn test_legacy_manifest_defaults_match_current_walker_defaults() {
 
     assert_eq!(manifest.inputs.max_file_size, 1024 * 1024);
     assert!(!manifest.inputs.follow_symlinks);
+    assert_eq!(manifest.inputs.embedding_passage_prefix_sha256, "");
 }
 
 #[test]
@@ -146,5 +148,9 @@ fn test_config_change_invalidates_manifest() {
 
     let mut changed_inputs = inputs.clone();
     changed_inputs.chunk_size += 128;
+    assert!(!manifest.matches_index_inputs("collection", &changed_inputs));
+
+    let mut changed_inputs = inputs;
+    changed_inputs.embedding_passage_prefix_sha256 = "changed-prefix".into();
     assert!(!manifest.matches_index_inputs("collection", &changed_inputs));
 }

@@ -114,9 +114,13 @@ impl Config {
             embedding_model: first_non_empty_env(&["EMBEDDING_MODEL"])
                 .unwrap_or(defaults.embedding_model),
             embedding_api_key: first_non_empty_env(EMBEDDING_API_KEY_ENV_KEYS),
-            embedding_query_prefix: preserving_whitespace_env("EMBEDDING_QUERY_PREFIX")
+            embedding_query_prefix: env::var("EMBEDDING_QUERY_PREFIX")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
                 .unwrap_or(defaults.embedding_query_prefix),
-            embedding_passage_prefix: preserving_whitespace_env("EMBEDDING_PASSAGE_PREFIX")
+            embedding_passage_prefix: env::var("EMBEDDING_PASSAGE_PREFIX")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
                 .unwrap_or(defaults.embedding_passage_prefix),
             milvus_url: first_non_empty_env(MILVUS_URL_ENV_KEYS).unwrap_or(defaults.milvus_url),
             milvus_token: first_non_empty_env(&["MILVUS_TOKEN"]),
@@ -179,6 +183,8 @@ impl Config {
             batch_size = config.batch_size,
             concurrency = config.concurrency,
             embedding_dimension = config.embedding_dimension,
+            embedding_query_prefix_enabled = !config.embedding_query_prefix.is_empty(),
+            embedding_passage_prefix_enabled = !config.embedding_passage_prefix.is_empty(),
             "configuration loaded from environment"
         );
         config
@@ -245,10 +251,6 @@ fn first_non_empty_env(keys: &[&str]) -> Option<String> {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
     })
-}
-
-fn preserving_whitespace_env(key: &str) -> Option<String> {
-    env::var(key).ok().filter(|value| !value.trim().is_empty())
 }
 
 #[cfg(test)]
@@ -363,8 +365,25 @@ mod tests {
 
         let config = Config::from_env();
 
-        assert!(config.embedding_query_prefix.ends_with('\n'));
-        assert!(config.embedding_passage_prefix.ends_with('\n'));
+        assert_eq!(
+            config.embedding_query_prefix,
+            "Find the most relevant code snippet given the following query:\n"
+        );
+        assert_eq!(config.embedding_passage_prefix, "Candidate code snippet:\n");
+    }
+
+    #[test]
+    fn from_env_treats_blank_embedding_prefixes_as_unset() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::new(&[
+            ("EMBEDDING_QUERY_PREFIX", Some("")),
+            ("EMBEDDING_PASSAGE_PREFIX", Some(" \t\n")),
+        ]);
+
+        let config = Config::from_env();
+
+        assert_eq!(config.embedding_query_prefix, "");
+        assert_eq!(config.embedding_passage_prefix, "");
     }
 
     #[test]

@@ -39,19 +39,25 @@ impl TokenBucket {
         self.last_refill = now;
     }
 
-    fn try_acquire(&mut self, cost: f64) -> Option<std::time::Duration> {
+    fn wait_time(&mut self, cost: f64) -> Option<std::time::Duration> {
         if self.unlimited {
             return None;
         }
         self.refill();
         if self.tokens >= cost {
-            self.tokens -= cost;
             None
         } else {
             let deficit = cost - self.tokens;
             Some(std::time::Duration::from_secs_f64(
                 deficit / self.refill_rate,
             ))
+        }
+    }
+
+    fn consume(&mut self, cost: f64) {
+        if !self.unlimited {
+            debug_assert!(self.tokens >= cost);
+            self.tokens -= cost;
         }
     }
 }
@@ -75,18 +81,26 @@ impl RateLimiter {
     }
 
     pub async fn acquire(&self, estimated_tokens: u64) {
-        loop {
-            let wait = {
-                let rpm_wait = self.rpm.lock().try_acquire(1.0);
-                let tpm_wait = self.tpm.lock().try_acquire(estimated_tokens as f64);
-                match (rpm_wait, tpm_wait) {
-                    (None, None) => break,
-                    (Some(a), Some(b)) => a.max(b),
-                    (Some(a), None) | (None, Some(a)) => a,
-                }
-            };
+        while let Some(wait) = self.try_acquire(estimated_tokens) {
             debug!("Rate limiter: sleeping {}ms", wait.as_millis());
             tokio::time::sleep(wait).await;
+        }
+    }
+
+    fn try_acquire(&self, estimated_tokens: u64) -> Option<std::time::Duration> {
+        let mut rpm = self.rpm.lock();
+        let mut tpm = self.tpm.lock();
+        let rpm_wait = rpm.wait_time(1.0);
+        let tpm_cost = estimated_tokens as f64;
+        let tpm_wait = tpm.wait_time(tpm_cost);
+        match (rpm_wait, tpm_wait) {
+            (None, None) => {
+                rpm.consume(1.0);
+                tpm.consume(tpm_cost);
+                None
+            }
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
         }
     }
 
@@ -221,7 +235,12 @@ impl EmbeddingClient {
 
     /// Generates an embedding for a single text.
     pub async fn embed(&self, text: &str) -> Result<EmbeddingVector> {
-        let texts = vec![format!("{}{}", self.config.query_prefix, text)];
+        let query = if self.config.query_prefix.is_empty() {
+            text.to_owned()
+        } else {
+            format!("{}{}", self.config.query_prefix, text)
+        };
+        let texts = vec![query];
         let mut results = self.embed_texts(&texts).await?;
 
         results
@@ -231,6 +250,9 @@ impl EmbeddingClient {
 
     /// Generates embeddings for multiple texts in batches.
     pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<EmbeddingVector>> {
+        if self.config.passage_prefix.is_empty() {
+            return self.embed_texts(texts).await;
+        }
         let texts = texts
             .iter()
             .map(|text| format!("{}{}", self.config.passage_prefix, text))
@@ -378,6 +400,13 @@ impl Embedder {
         matches!(self, Self::Http(_))
     }
 
+    pub fn passage_prefix(&self) -> &str {
+        match self {
+            Self::Http(client) => &client.config.passage_prefix,
+            Self::Disabled => "",
+        }
+    }
+
     pub async fn embed(&self, text: &str) -> Result<EmbeddingVector> {
         match self {
             Self::Http(client) => client.embed(text).await,
@@ -443,5 +472,106 @@ mod tests {
         )
         .await
         .expect("zero limits must not wait or panic");
+
+        for limiter in [RateLimiter::new(0, 1), RateLimiter::new(1, 0)] {
+            tokio::time::timeout(std::time::Duration::from_millis(50), limiter.acquire(1))
+                .await
+                .expect("one unlimited dimension must not block an available limited bucket");
+        }
+    }
+
+    #[test]
+    fn waiting_for_tpm_does_not_spend_rpm() {
+        let limiter = RateLimiter::new(1, 1);
+        limiter.tpm.lock().tokens = 0.0;
+
+        assert!(limiter.try_acquire(1).is_some());
+        assert_eq!(limiter.rpm.lock().tokens, 1.0);
+    }
+
+    #[tokio::test]
+    async fn embedding_requests_preserve_query_and_passage_contracts() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                let header_end = loop {
+                    if let Some(position) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                    {
+                        break position + 4;
+                    }
+                    let read = stream.read(&mut buffer).await.unwrap();
+                    assert!(read > 0, "request ended before its headers");
+                    request.extend_from_slice(&buffer[..read]);
+                };
+                let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                while request.len() < header_end + content_length {
+                    let read = stream.read(&mut buffer).await.unwrap();
+                    assert!(read > 0, "request ended before its body");
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request[header_end..header_end + content_length])
+                        .unwrap();
+                let embedding_count = body["input"].as_array().unwrap().len();
+                bodies.push(body);
+
+                let data = (0..embedding_count)
+                    .map(|_| serde_json::json!({"embedding": [0.0]}))
+                    .collect::<Vec<_>>();
+                let response = serde_json::to_vec(&serde_json::json!({"data": data})).unwrap();
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    response.len()
+                );
+                stream.write_all(headers.as_bytes()).await.unwrap();
+                stream.write_all(&response).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
+            bodies
+        });
+
+        let endpoint = format!("http://{address}/v1/embeddings");
+        let prefixed = EmbeddingClient::new(EmbeddingConfig {
+            url: endpoint.clone(),
+            model: "test-model".into(),
+            query_prefix: "query:\n".into(),
+            passage_prefix: "passage:\n".into(),
+            ..EmbeddingConfig::default()
+        });
+        prefixed.embed("needle").await.unwrap();
+        prefixed
+            .embed_batch(&["alpha".into(), "beta".into()])
+            .await
+            .unwrap();
+
+        let unprefixed = EmbeddingClient::new(EmbeddingConfig {
+            url: endpoint,
+            model: "test-model".into(),
+            ..EmbeddingConfig::default()
+        });
+        unprefixed.embed_batch(&["plain".into()]).await.unwrap();
+
+        let bodies = server.await.unwrap();
+        assert_eq!(bodies[0]["input"], serde_json::json!(["query:\nneedle"]));
+        assert_eq!(
+            bodies[1]["input"],
+            serde_json::json!(["passage:\nalpha", "passage:\nbeta"])
+        );
+        assert_eq!(bodies[2]["input"], serde_json::json!(["plain"]));
     }
 }

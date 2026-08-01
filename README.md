@@ -303,6 +303,12 @@ EMBEDDING_QUERY_PREFIX=$'Find the most relevant code snippet given the following
 EMBEDDING_PASSAGE_PREFIX=$'Candidate code snippet:\n'
 ```
 
+The `$'...'` form is Bash syntax for embedding a real newline; ordinary quoted
+`"...\\n"` text would pass a literal backslash and `n` to the embedding server.
+Changing `EMBEDDING_PASSAGE_PREFIX` invalidates the index manifest: run
+`index_codebase` to perform the required full rebuild. `update_index` refuses
+the incompatible manifest instead of mixing vectors from different prefixes.
+
 ### Vector storage (optional)
 
 By default vectors persist to a local JSON store under `~/.cache/sindexer/`

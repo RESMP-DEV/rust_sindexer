@@ -50,6 +50,11 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ### Fixed
 
+- Include the passage-prefix fingerprint in manifest compatibility so prefix
+  changes require a full rebuild instead of mixing incompatible vectors.
+- Acquire RPM and TPM capacity atomically so waiting on one bucket cannot
+  consume tokens from the other; avoid prefix allocations when prefixes are
+  disabled.
 - Updated manifest-test helpers for the Rust 1.97 clippy rules used by CI.
 - Resolved new Rust 1.97 clippy lints (collapsible if, redundant
   `.into_iter()`, manual `contains`, and an allowed too-many-arguments on an
