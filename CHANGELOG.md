@@ -29,6 +29,8 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ### Added
 
+- Added separate query and passage prefix settings for task-aware embedding
+  models, including calibrated Jina code embeddings.
 - The binary now accepts `-h`/`--help` and `-V`/`--version`, printing usage
   (with MCP registration examples) and the crate version respectively.
   Unknown arguments are still ignored, so existing MCP client launches are
@@ -48,6 +50,12 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ### Fixed
 
+- Include the passage-prefix fingerprint in manifest compatibility so prefix
+  changes require a full rebuild instead of mixing incompatible vectors.
+- Acquire RPM and TPM capacity atomically so waiting on one bucket cannot
+  consume tokens from the other; avoid prefix allocations when prefixes are
+  disabled.
+- Updated manifest-test helpers for the Rust 1.97 clippy rules used by CI.
 - Resolved new Rust 1.97 clippy lints (collapsible if, redundant
   `.into_iter()`, manual `contains`, and an allowed too-many-arguments on an
   internal helper) so the CI lint gate passes on current stable.

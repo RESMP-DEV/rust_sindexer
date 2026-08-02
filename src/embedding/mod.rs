@@ -17,6 +17,7 @@ struct TokenBucket {
     tokens: f64,
     refill_rate: f64, // tokens per second
     last_refill: Instant,
+    unlimited: bool,
 }
 
 impl TokenBucket {
@@ -27,6 +28,7 @@ impl TokenBucket {
             tokens: per_minute,
             refill_rate,
             last_refill: Instant::now(),
+            unlimited: per_minute == 0.0,
         }
     }
 
@@ -37,16 +39,25 @@ impl TokenBucket {
         self.last_refill = now;
     }
 
-    fn try_acquire(&mut self, cost: f64) -> Option<std::time::Duration> {
+    fn wait_time(&mut self, cost: f64) -> Option<std::time::Duration> {
+        if self.unlimited {
+            return None;
+        }
         self.refill();
         if self.tokens >= cost {
-            self.tokens -= cost;
             None
         } else {
             let deficit = cost - self.tokens;
             Some(std::time::Duration::from_secs_f64(
                 deficit / self.refill_rate,
             ))
+        }
+    }
+
+    fn consume(&mut self, cost: f64) {
+        if !self.unlimited {
+            debug_assert!(self.tokens >= cost);
+            self.tokens -= cost;
         }
     }
 }
@@ -70,18 +81,26 @@ impl RateLimiter {
     }
 
     pub async fn acquire(&self, estimated_tokens: u64) {
-        loop {
-            let wait = {
-                let rpm_wait = self.rpm.lock().try_acquire(1.0);
-                let tpm_wait = self.tpm.lock().try_acquire(estimated_tokens as f64);
-                match (rpm_wait, tpm_wait) {
-                    (None, None) => break,
-                    (Some(a), Some(b)) => a.max(b),
-                    (Some(a), None) | (None, Some(a)) => a,
-                }
-            };
+        while let Some(wait) = self.try_acquire(estimated_tokens) {
             debug!("Rate limiter: sleeping {}ms", wait.as_millis());
             tokio::time::sleep(wait).await;
+        }
+    }
+
+    fn try_acquire(&self, estimated_tokens: u64) -> Option<std::time::Duration> {
+        let mut rpm = self.rpm.lock();
+        let mut tpm = self.tpm.lock();
+        let rpm_wait = rpm.wait_time(1.0);
+        let tpm_cost = estimated_tokens as f64;
+        let tpm_wait = tpm.wait_time(tpm_cost);
+        match (rpm_wait, tpm_wait) {
+            (None, None) => {
+                rpm.consume(1.0);
+                tpm.consume(tpm_cost);
+                None
+            }
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
         }
     }
 
@@ -111,6 +130,10 @@ pub struct EmbeddingConfig {
     pub batch_size: usize,
     /// Optional API key for providers that require bearer auth.
     pub api_key: Option<String>,
+    /// Prefix applied to individual search queries.
+    pub query_prefix: String,
+    /// Prefix applied to batches of indexed passages.
+    pub passage_prefix: String,
 }
 
 impl Default for EmbeddingConfig {
@@ -120,6 +143,8 @@ impl Default for EmbeddingConfig {
             model: "all-minilm".to_string(),
             batch_size: 100,
             api_key: None,
+            query_prefix: String::new(),
+            passage_prefix: String::new(),
         }
     }
 }
@@ -139,6 +164,8 @@ impl EmbeddingConfig {
             model: config.embedding_model.clone(),
             batch_size: config.batch_size,
             api_key: config.embedding_api_key.clone(),
+            query_prefix: config.embedding_query_prefix.clone(),
+            passage_prefix: config.embedding_passage_prefix.clone(),
         }
     }
 }
@@ -208,8 +235,13 @@ impl EmbeddingClient {
 
     /// Generates an embedding for a single text.
     pub async fn embed(&self, text: &str) -> Result<EmbeddingVector> {
-        let texts = vec![text.to_string()];
-        let mut results = self.embed_batch(&texts).await?;
+        let query = if self.config.query_prefix.is_empty() {
+            text.to_owned()
+        } else {
+            format!("{}{}", self.config.query_prefix, text)
+        };
+        let texts = vec![query];
+        let mut results = self.embed_texts(&texts).await?;
 
         results
             .pop()
@@ -218,6 +250,17 @@ impl EmbeddingClient {
 
     /// Generates embeddings for multiple texts in batches.
     pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<EmbeddingVector>> {
+        if self.config.passage_prefix.is_empty() {
+            return self.embed_texts(texts).await;
+        }
+        let texts = texts
+            .iter()
+            .map(|text| format!("{}{}", self.config.passage_prefix, text))
+            .collect::<Vec<_>>();
+        self.embed_texts(&texts).await
+    }
+
+    async fn embed_texts(&self, texts: &[String]) -> Result<Vec<EmbeddingVector>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
@@ -357,6 +400,13 @@ impl Embedder {
         matches!(self, Self::Http(_))
     }
 
+    pub fn passage_prefix(&self) -> &str {
+        match self {
+            Self::Http(client) => &client.config.passage_prefix,
+            Self::Disabled => "",
+        }
+    }
+
     pub async fn embed(&self, text: &str) -> Result<EmbeddingVector> {
         match self {
             Self::Http(client) => client.embed(text).await,
@@ -387,6 +437,8 @@ mod tests {
         assert_eq!(config.model, "all-minilm");
         assert_eq!(config.batch_size, 100);
         assert_eq!(config.api_key, None);
+        assert_eq!(config.query_prefix, "");
+        assert_eq!(config.passage_prefix, "");
     }
 
     #[test]
@@ -395,6 +447,8 @@ mod tests {
             embedding_url: "https://api.openai.com/v1".to_string(),
             embedding_model: "text-embedding-3-small".to_string(),
             embedding_api_key: Some("secret".to_string()),
+            embedding_query_prefix: "query: ".to_string(),
+            embedding_passage_prefix: "passage: ".to_string(),
             batch_size: 32,
             ..Config::default()
         };
@@ -405,5 +459,137 @@ mod tests {
         assert_eq!(config.model, "text-embedding-3-small");
         assert_eq!(config.batch_size, 32);
         assert_eq!(config.api_key.as_deref(), Some("secret"));
+        assert_eq!(config.query_prefix, "query: ");
+        assert_eq!(config.passage_prefix, "passage: ");
+    }
+
+    #[tokio::test]
+    async fn zero_rate_limits_are_unlimited() {
+        let limiter = RateLimiter::new(0, 0);
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            limiter.acquire(u64::MAX),
+        )
+        .await
+        .expect("zero limits must not wait or panic");
+
+        for limiter in [RateLimiter::new(0, 1), RateLimiter::new(1, 0)] {
+            tokio::time::timeout(std::time::Duration::from_millis(50), limiter.acquire(1))
+                .await
+                .expect("one unlimited dimension must not block an available limited bucket");
+        }
+    }
+
+    #[test]
+    fn waiting_for_tpm_does_not_spend_rpm() {
+        let limiter = RateLimiter::new(1, 1);
+        limiter.tpm.lock().tokens = 0.0;
+
+        assert!(limiter.try_acquire(1).is_some());
+        assert_eq!(limiter.rpm.lock().tokens, 1.0);
+    }
+
+    #[tokio::test]
+    async fn embedding_requests_preserve_query_and_passage_contracts() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for _ in 0..3 {
+                let (mut stream, _) =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept())
+                        .await
+                        .map_err(|error| {
+                            format!("timed out waiting for embedding request: {error}")
+                        })?
+                        .map_err(|error| format!("failed to accept embedding request: {error}"))?;
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                let header_end = loop {
+                    if let Some(position) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                    {
+                        break position + 4;
+                    }
+                    let read = stream
+                        .read(&mut buffer)
+                        .await
+                        .map_err(|error| format!("failed to read request headers: {error}"))?;
+                    if read == 0 {
+                        return Err("request ended before its headers".to_string());
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                };
+                let headers = std::str::from_utf8(&request[..header_end])
+                    .map_err(|error| format!("request headers were not UTF-8: {error}"))?;
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .ok_or_else(|| "missing or malformed Content-Length".to_string())?;
+                while request.len() < header_end + content_length {
+                    let read = stream
+                        .read(&mut buffer)
+                        .await
+                        .map_err(|error| format!("failed to read request body: {error}"))?;
+                    if read == 0 {
+                        return Err("request ended before its body".to_string());
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request[header_end..header_end + content_length])
+                        .unwrap();
+                let embedding_count = body["input"].as_array().unwrap().len();
+                bodies.push(body);
+
+                let data = (0..embedding_count)
+                    .map(|_| serde_json::json!({"embedding": [0.0]}))
+                    .collect::<Vec<_>>();
+                let response = serde_json::to_vec(&serde_json::json!({"data": data})).unwrap();
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    response.len()
+                );
+                stream.write_all(headers.as_bytes()).await.unwrap();
+                stream.write_all(&response).await.unwrap();
+                let _ = stream.shutdown().await;
+            }
+            Ok::<_, String>(bodies)
+        });
+
+        let endpoint = format!("http://{address}/v1/embeddings");
+        let prefixed = EmbeddingClient::new(EmbeddingConfig {
+            url: endpoint.clone(),
+            model: "test-model".into(),
+            query_prefix: "query:\n".into(),
+            passage_prefix: "passage:\n".into(),
+            ..EmbeddingConfig::default()
+        });
+        prefixed.embed("needle").await.unwrap();
+        prefixed
+            .embed_batch(&["alpha".into(), "beta".into()])
+            .await
+            .unwrap();
+
+        let unprefixed = EmbeddingClient::new(EmbeddingConfig {
+            url: endpoint,
+            model: "test-model".into(),
+            ..EmbeddingConfig::default()
+        });
+        unprefixed.embed_batch(&["plain".into()]).await.unwrap();
+
+        let bodies = server.await.unwrap().unwrap();
+        assert_eq!(bodies[0]["input"], serde_json::json!(["query:\nneedle"]));
+        assert_eq!(
+            bodies[1]["input"],
+            serde_json::json!(["passage:\nalpha", "passage:\nbeta"])
+        );
+        assert_eq!(bodies[2]["input"], serde_json::json!(["plain"]));
     }
 }

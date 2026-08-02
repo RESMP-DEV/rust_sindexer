@@ -143,6 +143,7 @@ async fn run_index_codebase(
         &state.walker.ignore_patterns,
         state.walker.max_file_size,
         state.walker.follow_symlinks,
+        state.embedder.passage_prefix(),
     );
 
     // Phase 1: Walk files
@@ -1254,6 +1255,8 @@ mod tests {
                 model: "test".to_string(),
                 batch_size: 100,
                 api_key: None,
+                query_prefix: String::new(),
+                passage_prefix: String::new(),
             })),
             VectorStore::Milvus(MilvusClient::new(milvus_url, None)),
             dimension,
