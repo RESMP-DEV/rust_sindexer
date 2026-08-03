@@ -4,11 +4,6 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ## [Unreleased]
 
-### Fixed
-
-- Updated vulnerable transitive Rust dependencies and aligned the
-  `cargo-deny` advisory policy with the current configuration schema.
-
 ### Documentation
 
 - Restructured the README for first-time users: added a plain-language
@@ -55,6 +50,8 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ### Fixed
 
+- Updated vulnerable transitive Rust dependencies and aligned the
+  `cargo-deny` advisory policy with the current configuration schema.
 - Include the passage-prefix fingerprint in manifest compatibility so prefix
   changes require a full rebuild instead of mixing incompatible vectors.
 - Acquire RPM and TPM capacity atomically so waiting on one bucket cannot
