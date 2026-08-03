@@ -197,6 +197,9 @@ async fn run_index_codebase(
                         collection = %collection_name,
                         "Scoped vector collection is missing; rebuilding this codebase index"
                     );
+                    warnings.push(format!(
+                        "scoped vector collection {collection_name} was missing; rebuilt this codebase index"
+                    ));
                     full_reindex = true;
                 }
 
@@ -261,10 +264,15 @@ async fn run_index_codebase(
             }
             Some(_) => {
                 warn!(path = %path.display(), "Index manifest is incompatible; rebuilding this codebase index");
+                warnings.push(
+                    "index manifest was incompatible; rebuilt this codebase index".to_string(),
+                );
                 full_reindex = true;
             }
             None => {
                 warn!(path = %path.display(), "Index manifest is missing; rebuilding this codebase index");
+                warnings
+                    .push("index manifest was missing; rebuilt this codebase index".to_string());
                 full_reindex = true;
             }
         }
@@ -1277,6 +1285,10 @@ mod tests {
         let result = update_codebase_index(&state, root).await.unwrap();
 
         assert_eq!(result.files_processed, 1);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("manifest was missing")));
         assert_eq!(state.get_status().await.status, IndexState::Completed);
         assert!(state.manifest_store.load(root).unwrap().is_some());
     }

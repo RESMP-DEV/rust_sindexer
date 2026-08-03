@@ -436,29 +436,9 @@ cd rust_sindexer
 cargo build --release
 ```
 
-### 2. Replace your MCP configuration
+### 2. Configure the MCP client
 
 Register the server as `sindexer`; do not retain stale wrapper or provider names.
-
-**Before** (JS version):
-
-```json
-{
-  "mcpServers": {
-    "sindexer": {
-      "command": "npx",
-      "args": [],
-      "env": {
-        "OPENAI_API_KEY": "sk-...",
-        "MILVUS_ADDRESS": "https://your-cluster.zillizcloud.com",
-        "MILVUS_TOKEN": "your-token"
-      }
-    }
-  }
-}
-```
-
-**After** (sindexer):
 
 ```json
 {
