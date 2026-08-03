@@ -4,6 +4,12 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- `update_index` now self-heals a missing or incompatible per-codebase manifest
+  or vector collection by rebuilding only that scoped index. Unrelated
+  collections are never used as a fallback or removed.
+
 ### Documentation
 
 - Restructured the README for first-time users: added a plain-language

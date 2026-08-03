@@ -10,8 +10,8 @@ working on. It's a single native binary with no Node.js, no Docker, and no
 accounts required: with zero configuration it serves keyword (BM25) search out
 of a local on-disk index, and you can optionally plug in an embedding service
 for natural-language semantic search and Milvus/Zilliz for large-scale
-deployments. It is also a drop-in replacement for
-[`@zilliz/claude-context-mcp`](https://www.npmjs.com/package/@zilliz/claude-context-mcp).
+deployments. It is the repository's supported Rust Index CLI and the only
+indexing runtime.
 
 **Who it's for:** developers using AI coding tools who want their assistant to
 retrieve *actual relevant code* from large repositories instead of guessing.
@@ -168,7 +168,7 @@ must be **absolute** filesystem paths; relative paths are rejected.
 | Tool | Parameters | What it does |
 | --- | --- | --- |
 | `index_codebase` | `path`, `force` (default `false`) | Index a directory. Performs an initial full build when no compatible index exists; pass `force: true` only when a full rebuild is intended. Returns quickly — poll `get_indexing_status` for completion. |
-| `update_index` | `path` | Incrementally refresh an existing index: only changed/deleted files are touched. Refuses to fall back to a full rebuild if the manifest or backing collection is missing or incompatible. |
+| `update_index` | `path` | Refresh an index incrementally when compatible; if this codebase's manifest or scoped collection is missing or incompatible, safely rebuild only that codebase. |
 | `search_code` | `path`, `query`, `limit` (default `10`), `extensions` (e.g. `["rs", "py"]`) | Hybrid search (semantic + BM25, fused via RRF). Returns chunks with file paths, line numbers, language, and scores. Falls back to lexical-only when no embedding service is configured. |
 | `get_indexing_status` | `path` | Current state for a path: `idle`, `indexing`, `completed`, or `failed`, with progress counters. |
 | `clear_index` | `path` | Remove all indexed data (vectors + lexical index) for a codebase. |
@@ -305,9 +305,9 @@ EMBEDDING_PASSAGE_PREFIX=$'Candidate code snippet:\n'
 
 The `$'...'` form is Bash syntax for embedding a real newline; ordinary quoted
 `"...\n"` text would pass a literal backslash and `n` to the embedding server.
-Changing `EMBEDDING_PASSAGE_PREFIX` invalidates the index manifest: run
-`index_codebase` to perform the required full rebuild. `update_index` refuses
-the incompatible manifest instead of mixing vectors from different prefixes.
+Changing `EMBEDDING_PASSAGE_PREFIX` invalidates the index manifest. `update_index`
+detects the incompatibility and performs a full rebuild scoped to that codebase,
+without touching unrelated collections.
 
 ### Vector storage (optional)
 
@@ -423,7 +423,7 @@ With Milvus/Zilliz, yes: set `SINDEXER_COLLECTION_IDENTITY` and
 `SINDEXER_COLLECTION_ROOT` so different checkout paths on different hosts map
 to the same collection. The local on-disk store is per-machine.
 
-## Migrating from @zilliz/claude-context-mcp
+## Configure the Rust Index CLI
 
 ### 1. Get the binary
 
@@ -436,34 +436,14 @@ cd rust_sindexer
 cargo build --release
 ```
 
-### 2. Replace your MCP configuration
+### 2. Configure the MCP client
 
-Keep the server name `claude-context` so existing tool references keep working.
-
-**Before** (JS version):
+Register the server as `sindexer`; do not retain stale wrapper or provider names.
 
 ```json
 {
   "mcpServers": {
-    "claude-context": {
-      "command": "npx",
-      "args": ["@zilliz/claude-context-mcp@latest"],
-      "env": {
-        "OPENAI_API_KEY": "sk-...",
-        "MILVUS_ADDRESS": "https://your-cluster.zillizcloud.com",
-        "MILVUS_TOKEN": "your-token"
-      }
-    }
-  }
-}
-```
-
-**After** (sindexer):
-
-```json
-{
-  "mcpServers": {
-    "claude-context": {
+    "sindexer": {
       "type": "stdio",
       "command": "/path/to/sindexer",
       "args": [],

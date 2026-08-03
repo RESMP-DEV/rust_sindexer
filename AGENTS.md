@@ -22,7 +22,7 @@ Global MCP client configuration (Claude Code `~/.claude.json`, Claude Desktop, e
 }
 ```
 
-The AlphaHENG wrapper script (`scripts/run_claude_context_mcp.sh`) auto-discovers the binary and loads credentials from `~/.context/.env`.
+AlphaHENG invokes the Rust Index CLI binary directly and supplies its runtime environment from the control machine.
 
 ## Operating Modes
 
