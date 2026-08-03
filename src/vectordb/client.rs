@@ -147,19 +147,19 @@ struct MilvusResponse {
 }
 
 #[derive(Deserialize)]
-struct InsertResponse {
+struct UpsertResponse {
     code: i32,
-    data: Option<InsertResponseData>,
+    data: Option<UpsertResponseData>,
     message: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct InsertResponseData {
+struct UpsertResponseData {
     // The upsert endpoint reports `upsertCount`; older insert responses used
     // `insertCount`. Accept both or a real accepted count reads as zero and
     // the pipeline aborts with "inserted 0 vectors".
-    #[serde(rename = "insertCount", alias = "upsertCount", default)]
-    insert_count: usize,
+    #[serde(rename = "upsertCount", alias = "insertCount", default)]
+    upsert_count: usize,
 }
 
 #[derive(Serialize)]
@@ -494,7 +494,7 @@ impl MilvusClient {
     /// # Arguments
     /// * `collection` - Collection name
     /// * `data` - Rows to insert
-    pub async fn insert_batch(&self, collection: &str, data: &[InsertRow]) -> Result<usize> {
+    pub async fn upsert_batch(&self, collection: &str, data: &[InsertRow]) -> Result<usize> {
         if data.is_empty() {
             return Ok(0);
         }
@@ -503,7 +503,7 @@ impl MilvusClient {
         debug!(
             collection,
             rows = batch_size,
-            "Milvus insert_batch starting"
+            "Milvus upsert_batch starting"
         );
         let start = std::time::Instant::now();
         const MAX_RETRIES: u32 = 3;
@@ -515,7 +515,7 @@ impl MilvusClient {
             data: data.to_vec(),
         };
         let body_bytes = serde_json::to_vec(&request_body)
-            .context("failed to serialize insert batch request")?;
+            .context("failed to serialize upsert batch request")?;
 
         let mut last_err = None;
         for attempt in 0..=MAX_RETRIES {
@@ -534,7 +534,7 @@ impl MilvusClient {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    warn!(collection, attempt, error = %e, "Milvus insert_batch request failed");
+                    warn!(collection, attempt, error = %e, "Milvus upsert_batch request failed");
                     last_err = Some(format!("request failed: {e}"));
                     continue;
                 }
@@ -543,22 +543,22 @@ impl MilvusClient {
             let status = response.status();
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
                 let body = response.text().await.unwrap_or_default();
-                warn!(collection, attempt, status = %status, "Milvus insert_batch retryable error");
+                warn!(collection, attempt, status = %status, "Milvus upsert_batch retryable error");
                 last_err = Some(format!("Milvus returned {status}: {body}"));
                 continue;
             }
 
-            let response: InsertResponse = response
+            let response: UpsertResponse = response
                 .json()
                 .await
-                .context("failed to parse insert batch response")?;
+                .context("failed to parse upsert batch response")?;
 
             if response.code != 0 {
                 let msg = response
                     .message
                     .unwrap_or_else(|| "unknown error".to_string());
-                warn!(collection, code = response.code, error = %msg, "Milvus insert_batch rejected");
-                anyhow::bail!("insert batch failed: {}", msg);
+                warn!(collection, code = response.code, error = %msg, "Milvus upsert_batch rejected");
+                anyhow::bail!("upsert batch failed: {}", msg);
             }
 
             debug!(
@@ -567,21 +567,21 @@ impl MilvusClient {
                 inserted = response
                     .data
                     .as_ref()
-                    .map(|data| data.insert_count)
+                    .map(|data| data.upsert_count)
                     .unwrap_or(batch_size),
                 elapsed_ms = start.elapsed().as_millis() as u64,
-                "Milvus insert_batch completed"
+                "Milvus upsert_batch completed"
             );
             return Ok(response
                 .data
-                .map(|data| data.insert_count)
+                .map(|data| data.upsert_count)
                 .unwrap_or(batch_size));
         }
 
         let err_msg = last_err.unwrap_or_else(|| "unknown error".to_string());
-        warn!(collection, retries = MAX_RETRIES, error = %err_msg, "Milvus insert_batch exhausted retries");
+        warn!(collection, retries = MAX_RETRIES, error = %err_msg, "Milvus upsert_batch exhausted retries");
         anyhow::bail!(
-            "insert batch failed after {} retries: {}",
+            "upsert batch failed after {} retries: {}",
             MAX_RETRIES,
             err_msg
         )
@@ -718,6 +718,23 @@ impl SearchResultsData {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn upsert_response_accepts_both_count_fields() {
+        let response: super::UpsertResponse = serde_json::from_value(serde_json::json!({
+            "code": 0,
+            "data": {"upsertCount": 5}
+        }))
+        .unwrap();
+        assert_eq!(response.data.unwrap().upsert_count, 5);
+
+        let response: super::UpsertResponse = serde_json::from_value(serde_json::json!({
+            "code": 0,
+            "data": {"insertCount": 3}
+        }))
+        .unwrap();
+        assert_eq!(response.data.unwrap().upsert_count, 3);
+    }
+
     use super::{milvus_id_for_chunk_id, SearchResponse};
 
     #[test]

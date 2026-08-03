@@ -472,7 +472,7 @@ async fn run_index_codebase(
 
                 let mut inserted = 0usize;
                 for rows in insert_rows.chunks(MILVUS_BATCH_SIZE) {
-                    inserted += vs.insert_batch(&collection, rows).await?;
+                    inserted += vs.upsert_batch(&collection, rows).await?;
                 }
 
                 drop(permit);

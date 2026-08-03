@@ -44,7 +44,7 @@ impl VectorStore {
         }
     }
 
-    pub async fn insert_batch(&self, collection: &str, data: &[InsertRow]) -> Result<usize> {
+    pub async fn upsert_batch(&self, collection: &str, data: &[InsertRow]) -> Result<usize> {
         debug!(collection, batch_size = data.len(), "inserting batch");
         match self {
             Self::Local(store) => {
@@ -61,7 +61,7 @@ impl VectorStore {
                 store.insert_docs(collection, docs)?;
                 Ok(inserted)
             }
-            Self::Milvus(client) => client.insert_batch(collection, data).await,
+            Self::Milvus(client) => client.upsert_batch(collection, data).await,
         }
     }
 
