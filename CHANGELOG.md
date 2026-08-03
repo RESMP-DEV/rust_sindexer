@@ -4,6 +4,13 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Batch vector writes use the Milvus `upsert` endpoint (parity with
+  rust-indexer): retried batches replace rows for existing primary keys
+  instead of duplicating them. The response parser accepts both
+  `upsertCount` and `insertCount`.
+
 ### Fixed
 
 - `update_index` now self-heals a missing or incompatible per-codebase manifest

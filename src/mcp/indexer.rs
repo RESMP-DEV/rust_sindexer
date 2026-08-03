@@ -918,7 +918,7 @@ mod tests {
                 }),
             ),
             (
-                "/v2/vectordb/entities/insert",
+                "/v2/vectordb/entities/upsert",
                 serde_json::json!({
                     "code": 0
                 }),
@@ -972,6 +972,7 @@ mod tests {
                     state.lock().unwrap().has_collection = false;
                     json!({ "code": 0 }).to_string()
                 } else if request_line.contains("/v2/vectordb/entities/insert")
+                    || request_line.contains("/v2/vectordb/entities/upsert")
                     || request_line.contains("/v2/vectordb/entities/delete")
                 {
                     json!({ "code": 0 }).to_string()
@@ -1462,7 +1463,7 @@ mod tests {
                 }),
             ),
             (
-                "/v2/vectordb/entities/insert",
+                "/v2/vectordb/entities/upsert",
                 serde_json::json!({
                     "code": 1,
                     "message": "insert rejected"

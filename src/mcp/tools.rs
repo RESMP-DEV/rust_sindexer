@@ -1224,7 +1224,7 @@ mod tests {
                     }),
                 ),
                 (
-                    "/v2/vectordb/entities/insert",
+                    "/v2/vectordb/entities/upsert",
                     serde_json::json!({
                         "code": 0
                     }),
