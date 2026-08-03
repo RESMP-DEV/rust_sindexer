@@ -49,6 +49,7 @@ fn default_inputs() -> IndexInputs {
         max_file_size: 1024 * 1024,
         follow_symlinks: false,
         embedding_passage_prefix_sha256: String::new(),
+        embedding_dimension: 384,
     }
 }
 
