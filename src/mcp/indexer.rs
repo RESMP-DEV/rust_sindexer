@@ -193,13 +193,10 @@ async fn run_index_codebase(
                 if embeddings_enabled
                     && !state.vector_store.has_collection(&collection_name).await?
                 {
-                    if incremental_only {
-                        update_status_failed(state, path).await;
-                        anyhow::bail!(
-                            "Incremental update requires existing vector collection {}; run index_codebase only when a full rebuild is intended",
-                            collection_name
-                        );
-                    }
+                    warn!(
+                        collection = %collection_name,
+                        "Scoped vector collection is missing; rebuilding this codebase index"
+                    );
                     full_reindex = true;
                 }
 
@@ -263,21 +260,11 @@ async fn run_index_codebase(
                 }
             }
             Some(_) => {
-                if incremental_only {
-                    update_status_failed(state, path).await;
-                    anyhow::bail!(
-                        "Incremental update requires a compatible index manifest; run index_codebase only when a full rebuild is intended"
-                    );
-                }
+                warn!(path = %path.display(), "Index manifest is incompatible; rebuilding this codebase index");
                 full_reindex = true;
             }
             None => {
-                if incremental_only {
-                    update_status_failed(state, path).await;
-                    anyhow::bail!(
-                        "Incremental update requires an existing index manifest; run index_codebase first only when a full build is intended"
-                    );
-                }
+                warn!(path = %path.display(), "Index manifest is missing; rebuilding this codebase index");
                 full_reindex = true;
             }
         }
@@ -1279,7 +1266,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_incremental_update_requires_existing_manifest() {
+    async fn test_incremental_update_rebuilds_missing_manifest() {
         let temp_dir = TempDir::new().unwrap();
         let root = temp_dir.path();
         let cache_dir = TempDir::new().unwrap();
@@ -1287,12 +1274,11 @@ mod tests {
         fs::write(root.join("main.py"), "def add(a, b):\n    return a + b\n").unwrap();
 
         let state = make_lexical_indexer_state(root);
-        let err = update_codebase_index(&state, root).await.unwrap_err();
+        let result = update_codebase_index(&state, root).await.unwrap();
 
-        assert!(err
-            .to_string()
-            .contains("Incremental update requires an existing index manifest"));
-        assert_eq!(state.get_status().await.status, IndexState::Failed);
+        assert_eq!(result.files_processed, 1);
+        assert_eq!(state.get_status().await.status, IndexState::Completed);
+        assert!(state.manifest_store.load(root).unwrap().is_some());
     }
 
     #[tokio::test]

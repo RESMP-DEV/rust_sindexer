@@ -46,7 +46,7 @@ pub struct IndexCodebaseParams {
     pub force: bool,
 }
 
-/// Parameters for incrementally updating an existing codebase index.
+/// Parameters for updating a codebase index, with scoped self-healing.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct UpdateIndexParams {
     /// Absolute path to the codebase directory to update.
@@ -496,15 +496,12 @@ impl CodebaseTools {
         }))
     }
 
-    /// Incrementally update an existing codebase index.
-    ///
-    /// Refuses to fall back to a full rebuild when the manifest or collection
-    /// is missing or incompatible.
+    /// Update a codebase index, rebuilding only its scope when needed.
     #[tool(
         name = "update_index",
-        description = "Incrementally update an existing codebase index. Only changed and deleted \
-                       files are touched. Refuses to perform an initial or full rebuild when the \
-                       manifest or backing collection is missing or incompatible."
+        description = "Update a codebase index. Changed and deleted files are handled incrementally; a \
+                       missing or incompatible scoped manifest or collection is rebuilt safely for \
+                       that codebase."
     )]
     async fn update_index(
         &self,
