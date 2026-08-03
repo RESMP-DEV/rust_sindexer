@@ -4,6 +4,11 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Updated vulnerable transitive Rust dependencies and aligned the
+  `cargo-deny` advisory policy with the current configuration schema.
+
 ### Documentation
 
 - Restructured the README for first-time users: added a plain-language

@@ -1,6 +1,5 @@
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
+unmaintained = "all"
 
 [licenses]
 allow = [
@@ -18,7 +17,6 @@ allow = [
     "CDLA-Permissive-2.0",
     "MPL-2.0",
 ]
-copyleft = "deny"
 
 [bans]
 multiple-versions = "warn"
