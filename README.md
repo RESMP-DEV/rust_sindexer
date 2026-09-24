@@ -160,6 +160,27 @@ cargo build --release
 
 ## Usage
 
+### CLI mode (no MCP client required)
+
+The binary is dual-mode: verbs run as a plain CLI, no arguments launch the
+MCP stdio server.
+
+```bash
+sindexer index /abs/or/relative/project        # index (full build if needed)
+sindexer update project                       # incremental update
+sindexer search project "query" --limit 5      # hybrid semantic+lexical
+sindexer status project                       # indexing status
+sindexer clear project                        # remove the index
+sindexer collections                          # what is indexed, row counts
+sindexer stats <collection> | drop <collection>
+```
+
+Output is compact JSON on stdout (logs go to stderr). When `EMBEDDING_URL` is
+unset and an OpenAI-compatible embedding server answers on 127.0.0.1:1234, it
+is used automatically, so semantic mode works out of the box alongside a local
+LM Studio instance.
+
+
 ### MCP tools
 
 The server exposes eight tools to connected clients. All `path` parameters

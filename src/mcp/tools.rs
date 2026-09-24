@@ -1,7 +1,7 @@
 //! MCP tool definitions for codebase indexing and semantic search.
 
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rmcp::{
@@ -25,12 +25,9 @@ use tracing::{debug, info, warn};
 use super::hybrid::{fuse_hybrid_hits, HybridFusionOptions, HybridHit};
 use super::indexer::{self, IndexerState};
 use super::state::{create_default_shared_state, SharedState};
-use crate::embedding::{Embedder, EmbeddingClient, EmbeddingConfig};
 use crate::lexical::LexicalIndex;
-use crate::splitter::{CodeSplitter, Config as SplitterConfig};
 use crate::types::{IndexState, IndexStatus};
-use crate::vectordb::{collection_name_from_path, LocalStore, MilvusClient, VectorStore};
-use crate::walker::CodeWalker;
+use crate::vectordb::collection_name_from_path;
 
 // ============================================================================
 // Tool Input Schemas
@@ -72,44 +69,6 @@ fn default_limit() -> u32 {
     10
 }
 
-fn create_indexer_state(state: &SharedState, root_path: &Path) -> Arc<IndexerState> {
-    let config = &state.config;
-    let splitter = CodeSplitter::new(SplitterConfig {
-        root_path: root_path.to_path_buf(),
-        max_chunk_bytes: config.chunk_size,
-        overlap_lines: config.chunk_overlap / 80,
-        ..SplitterConfig::default()
-    });
-
-    let embedder = if state.embedder.is_enabled() {
-        let rate_limiter =
-            crate::embedding::RateLimiter::new(config.embedding_rpm, config.embedding_tpm);
-        Embedder::Http(EmbeddingClient::with_rate_limiter(
-            EmbeddingConfig::from_config(config),
-            rate_limiter,
-        ))
-    } else {
-        Embedder::Disabled
-    };
-
-    let vector_store = if matches!(state.vector_store, VectorStore::Milvus(_)) {
-        VectorStore::Milvus(MilvusClient::new(
-            &config.milvus_url,
-            config.milvus_token.clone(),
-        ))
-    } else {
-        VectorStore::Local(LocalStore::new())
-    };
-
-    Arc::new(IndexerState::with_concurrency(
-        CodeWalker::from_config(config),
-        splitter,
-        embedder,
-        vector_store,
-        config.embedding_dimension,
-        config.concurrency,
-    ))
-}
 
 fn should_request_live_rows(status: &IndexStatus) -> bool {
     match status.status {
@@ -449,7 +408,7 @@ impl CodebaseTools {
             )));
         }
 
-        let indexer_state = create_indexer_state(&self.state, &path);
+        let indexer_state = indexer::create_indexer_state(&self.state, &path);
         self.state.indexing_status.insert(
             path.clone(),
             IndexStatus {
@@ -518,7 +477,7 @@ impl CodebaseTools {
             )));
         }
 
-        let indexer_state = create_indexer_state(&self.state, &path);
+        let indexer_state = indexer::create_indexer_state(&self.state, &path);
         self.state.indexing_status.insert(
             path.clone(),
             IndexStatus {
@@ -884,6 +843,8 @@ mod tests {
     };
     use crate::lexical::test_support::set_test_cache_dir_async;
     use crate::mcp::state::create_shared_state_with_components;
+    use crate::splitter::{CodeSplitter, Config as SplitterConfig};
+    use crate::walker::CodeWalker;
 
     struct MockHttpServer {
         base_url: String,

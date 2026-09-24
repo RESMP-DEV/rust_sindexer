@@ -4,6 +4,16 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Native CLI mode: `sindexer <verb> [args]` with `index`, `update`, `search`,
+  `status`, `clear`, `collections`, `stats`, and `drop`. Verbs share the exact
+  indexing/search cores with the MCP tool layer (`create_indexer_state` moved
+  from tools.rs to indexer.rs for both paths). Paths may be relative; output is
+  compact JSON on stdout. When `EMBEDDING_URL` is unset and an embedding
+  server answers on 127.0.0.1:1234, it is used automatically. No arguments
+  still launches the MCP stdio server; unknown arguments are now an error.
+
 ### Changed
 
 - Batch vector writes use the Milvus `upsert` endpoint (parity with
