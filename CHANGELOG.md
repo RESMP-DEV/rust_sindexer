@@ -59,14 +59,13 @@ All notable changes to `rust_sindexer` will be documented in this file.
   locations, and added an on-disk layout section. `PARALLELISM` is parsed but
   not yet wired to the walker or rayon, so it stays undocumented.
 
-### Added
 
 - Added separate query and passage prefix settings for task-aware embedding
   models, including calibrated Jina code embeddings.
 - The binary now accepts `-h`/`--help` and `-V`/`--version`, printing usage
-  (with MCP registration examples) and the crate version respectively.
-  Unknown arguments are still ignored, so existing MCP client launches are
-  unaffected.
+  and the crate version respectively. As of the native CLI mode, unknown
+  arguments exit with status 2 instead of being ignored: MCP client configs
+  that pass extra launch arguments must be updated (breaking).
 - Added the `update_index` MCP tool for incremental-only refreshes of an
   existing compatible codebase index. It touches only changed/deleted files and
   fails instead of falling back to a full rebuild when the manifest or backing

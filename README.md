@@ -100,8 +100,9 @@ cargo install --path .
 
 ## Quickstart
 
-The binary is an MCP *server*: it communicates over stdin/stdout and is
-launched by an MCP client. You don't interact with it like a normal CLI.
+The binary is dual-mode: with no arguments it is an MCP *server* over
+stdin/stdout launched by an MCP client; with a verb it is a normal CLI (see
+[CLI mode](#cli-mode-no-mcp-client-required) below).
 
 ### 1. Register it with your AI tool
 

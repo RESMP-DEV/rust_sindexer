@@ -114,18 +114,50 @@ pub fn prepare_environment(verb: &str) {
     if !EMBEDDING_VERBS.contains(&verb) {
         return;
     }
-    if std::env::var("EMBEDDING_URL").is_ok_and(|v| !v.trim().is_empty()) {
+    let is_set = |key: &str| std::env::var(key).is_ok_and(|v| !v.trim().is_empty());
+    // config.rs accepts OPENAI_BASE_URL as an alias for EMBEDDING_URL; an
+    // explicit configuration of either must never be overridden.
+    if is_set("EMBEDDING_URL") || is_set("OPENAI_BASE_URL") {
         return;
     }
     if std::env::var("SINDEXER_AUTO_EMBEDDING").is_ok_and(|v| v == "0") {
         return;
     }
-    let addr = "127.0.0.1:1234".parse().expect("valid socket addr");
-    if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok() {
-        // A local OpenAI-compatible embedding server is assumed to be
-        // listening (LM Studio on this machine).
+    if let Some(dimension) = probe_local_embeddings() {
         std::env::set_var("EMBEDDING_URL", "http://127.0.0.1:1234/v1");
+        std::env::set_var("EMBEDDING_DIMENSION", dimension.to_string());
     }
+}
+
+/// Verify 127.0.0.1:1234 is actually an embeddings endpoint and measure the
+/// vector dimension, so the auto-default cannot mismatch the collection
+/// schema. Best-effort: any failure means lexical-only mode (no env set).
+fn probe_local_embeddings() -> Option<usize> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    let mut stream = TcpStream::connect("127.0.0.1:1234").ok()?;
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(2)));
+    let body = r#"{"input":["sindexer dimension probe"]}"#;
+    let request = format!(
+        "POST /v1/embeddings HTTP/1.1\r\nHost: 127.0.0.1:1234\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    let payload = response.split_once("\r\n\r\n")?.1;
+    // Tolerate chunked encoding crudely: find the JSON object start.
+    let json_start = payload.find('{')?;
+    let value: serde_json::Value = serde_json::from_str(&payload[json_start..]).ok()?;
+    let dimension = value
+        .pointer("/data/0/embedding")
+        .and_then(|array| array.as_array())
+        .map(|array| array.len())?;
+    if dimension == 0 {
+        return None;
+    }
+    Some(dimension)
 }
 
 fn shared_state() -> SharedState {
