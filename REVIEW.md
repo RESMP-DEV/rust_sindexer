@@ -16,6 +16,14 @@ Kilo reads this file from the pull request base branch. Apply these repository-o
 - For Rust changes, scrutinize unsafe blocks, Send/Sync assumptions, async cancellation, panic surfaces, error context, feature gates, and serialization/CLI compatibility.
 - Use focused unit or integration tests plus the repository's formatting, lint, and test commands; compile success is not enough for runtime or concurrency changes.
 
+## Deliberate decisions
+
+The following deviations are intentional choices from the native CLI-mode reviews (commits 189bf47, e6f8cac, 25897bb). Do not re-flag them without new evidence that the stated tradeoff no longer holds.
+
+- `sindexer drop` has no interactive confirmation. The CLI must stay scriptable for agents and automation; destructive verbs are explicit-only, and a missing collection is reported as `success:false` with exit 1 rather than prompting.
+- The CLI embedding auto-default requires neither `EMBEDDING_MODEL` nor an explicitly configured endpoint. It probes `/v1/embeddings` on 127.0.0.1:1234, verifies a real embeddings response, measures the vector dimension, honors `EMBEDDING_URL`/`OPENAI_BASE_URL` when set, and is disabled by `SINDEXER_AUTO_EMBEDDING=0`. A strict server that rejects the default model name fails loudly at embed time; that tradeoff keeps zero-configuration local semantic mode working.
+- CLI verbs carry no cross-process indexing guard. The MCP layer's `is_indexing` guard is session-state based and does not apply to one-shot processes; concurrent CLI runs against the same path are a documented limitation, not a defect to fix incidentally.
+
 ## Severity calibration
 
 - **Critical:** credible data loss or corruption, privilege or tenant-boundary bypass, credential exposure, remote code execution, materially wrong billing/financial behavior, unsafe hardware access, or silently invalid scientific/model results that would be promoted or published.
