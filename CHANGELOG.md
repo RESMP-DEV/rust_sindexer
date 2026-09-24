@@ -8,11 +8,20 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 - Native CLI mode: `sindexer <verb> [args]` with `index`, `update`, `search`,
   `status`, `clear`, `collections`, `stats`, and `drop`. Verbs share the exact
-  indexing/search cores with the MCP tool layer (`create_indexer_state` moved
-  from tools.rs to indexer.rs for both paths). Paths may be relative; output is
-  compact JSON on stdout. When `EMBEDDING_URL` is unset and an embedding
-  server answers on 127.0.0.1:1234, it is used automatically. No arguments
-  still launches the MCP stdio server; unknown arguments are now an error.
+  indexing/search cores with the MCP tool layer (`create_indexer_state` and
+  the live-rows helpers moved from tools.rs to indexer.rs for both paths).
+  Paths may be relative and are absolutized without resolving symlinks, so
+  CLI and MCP modes key the same collection for the same path string;
+  `clear` works on deleted paths (orphan cleanup) while `index`/`update`/
+  `search`/`status` validate existence (and directory-ness for the first
+  three). Output is compact JSON on stdout, including `warnings` and
+  `lexical_only` for index/update. For the embedding verbs only, when
+  `EMBEDDING_URL` is unset, `SINDEXER_AUTO_EMBEDDING` is not `0`, and
+  127.0.0.1:1234 accepts connections, `EMBEDDING_URL` defaults to
+  `http://127.0.0.1:1234/v1` — resolved before the async runtime starts.
+  Usage mistakes (unknown flags, extra positionals, missing values) exit 2;
+  `drop` on a missing collection reports `success:false` and exits 1. No
+  arguments still launches the MCP stdio server; unknown commands error.
 
 ### Changed
 

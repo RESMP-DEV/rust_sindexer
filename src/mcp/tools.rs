@@ -20,10 +20,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::task;
 use tokio::time::{sleep, Duration};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use super::hybrid::{fuse_hybrid_hits, HybridFusionOptions, HybridHit};
-use super::indexer::{self, IndexerState};
+use super::indexer::{
+    self, can_apply_live_rows, checked_live_row_count, should_request_live_rows, IndexerState,
+};
 use super::state::{create_default_shared_state, SharedState};
 use crate::lexical::LexicalIndex;
 use crate::types::{IndexState, IndexStatus};
@@ -67,45 +69,6 @@ pub struct SearchCodeParams {
 
 fn default_limit() -> u32 {
     10
-}
-
-
-fn should_request_live_rows(status: &IndexStatus) -> bool {
-    match status.status {
-        IndexState::Idle => true,
-        IndexState::Completed => {
-            status.vectors_inserted == 0
-                || status.embeddings_generated == 0
-                || status.total_chunks == 0
-        }
-        IndexState::Indexing | IndexState::Failed => false,
-    }
-}
-
-fn can_apply_live_rows(status: &IndexStatus, requested_from_idle: bool) -> bool {
-    match status.status {
-        IndexState::Idle => true,
-        IndexState::Completed => {
-            requested_from_idle
-                || status.vectors_inserted == 0
-                || status.embeddings_generated == 0
-                || status.total_chunks == 0
-        }
-        IndexState::Indexing | IndexState::Failed => false,
-    }
-}
-
-fn checked_live_row_count(row_count: u64) -> usize {
-    match usize::try_from(row_count) {
-        Ok(count) => count,
-        Err(_) => {
-            warn!(
-                row_count,
-                "Milvus row count exceeds this platform's usize; capping status counters"
-            );
-            usize::MAX
-        }
-    }
 }
 
 fn mirror_index_status(
