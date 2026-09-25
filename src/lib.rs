@@ -6,6 +6,7 @@ pub mod lexical;
 pub mod mcp;
 pub mod splitter;
 pub mod types;
+pub mod usage;
 pub mod vectordb;
 pub mod walker;
 

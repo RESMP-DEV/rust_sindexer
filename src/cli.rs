@@ -14,6 +14,7 @@
 //! mutation races worker threads.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 use serde_json::json;
@@ -25,6 +26,7 @@ use crate::mcp::hybrid::{fuse_hybrid_hits, HybridFusionOptions, HybridHit};
 use crate::mcp::indexer;
 use crate::mcp::state::{create_shared_state, SharedState};
 use crate::types::IndexStatus;
+use crate::usage::{self, HitMetrics, IndexLog, SearchLog};
 use crate::vectordb::collection_name_from_path;
 
 pub const VERBS: &[&str] = &[
@@ -36,6 +38,7 @@ pub const VERBS: &[&str] = &[
     "collections",
     "stats",
     "drop",
+    "usage",
 ];
 
 const EMBEDDING_VERBS: &[&str] = &["index", "update", "search"];
@@ -67,6 +70,10 @@ CLI VERBS:
     stats <collection>                  Row count for one collection.
     drop <collection>                   Permanently drop one collection
                                         (exit 1 if it did not exist).
+    usage [--since SPEC] [--repo TEXT] [--human]
+                                        Report usage telemetry and estimated
+                                        token savings. SPEC: Nh/Nd/Nw/Ny,
+                                        YYYY-MM-DD, or epoch seconds/ms.
 
 Paths may be relative; they are absolutized against the working directory but
 symlinks are NOT resolved, so CLI and MCP modes key the same collection for
@@ -74,6 +81,10 @@ the same absolute path string. Output is compact JSON on stdout, logs on
 stderr. For index/update/search, when EMBEDDING_URL is unset,
 SINDEXER_AUTO_EMBEDDING != 0, and 127.0.0.1:1234 accepts connections,
 EMBEDDING_URL defaults to http://127.0.0.1:1234/v1; otherwise lexical-only.
+
+Every search and index/update run appends a usage event to
+~/.context/usage/sindexer.jsonl (best-effort, never fails the command);
+SINDEXER_USAGE_LOG overrides the path, SINDEXER_USAGE_LOG=0 disables.
 
 MCP MODE:
     With no arguments sindexer speaks newline-delimited JSON-RPC on stdio,
@@ -176,42 +187,102 @@ fn shared_state() -> SharedState {
 
 /// `index` verb: build or rebuild the index, print the JSON summary.
 async fn cmd_index(path: &Path, force: bool) -> Result<i32> {
+    let start = Instant::now();
     let state = shared_state();
     let indexer_state = indexer::create_indexer_state(&state, path);
-    let result = indexer::index_codebase(&indexer_state, path, force).await?;
-    println!(
-        "{}",
-        json!({
-            "success": true,
-            "message": format!("Indexed {}", path.display()),
-            "path": path.display().to_string(),
-            "files_indexed": result.files_processed,
-            "chunks_created": result.chunks_created,
-            "lexical_only": result.lexical_only,
-            "warnings": result.warnings,
-        })
-    );
-    Ok(0)
+    let outcome = indexer::index_codebase(&indexer_state, path, force).await;
+    let duration_ms = start.elapsed().as_millis() as u64;
+    match outcome {
+        Ok(result) => {
+            println!(
+                "{}",
+                json!({
+                    "success": true,
+                    "message": format!("Indexed {}", path.display()),
+                    "path": path.display().to_string(),
+                    "files_indexed": result.files_processed,
+                    "chunks_created": result.chunks_created,
+                    "lexical_only": result.lexical_only,
+                    "warnings": result.warnings,
+                })
+            );
+            usage::log_index(IndexLog {
+                mode: "cli",
+                verb: "index",
+                repo: path,
+                files_processed: result.files_processed,
+                chunks_created: result.chunks_created,
+                duration_ms,
+                lexical_only: result.lexical_only,
+                error: None,
+            });
+            Ok(0)
+        }
+        Err(err) => {
+            let message = err.to_string();
+            usage::log_index(IndexLog {
+                mode: "cli",
+                verb: "index",
+                repo: path,
+                files_processed: 0,
+                chunks_created: 0,
+                duration_ms,
+                lexical_only: false,
+                error: Some(&message),
+            });
+            Err(err)
+        }
+    }
 }
 
 /// `update` verb: incremental refresh, print the JSON summary.
 async fn cmd_update(path: &Path) -> Result<i32> {
+    let start = Instant::now();
     let state = shared_state();
     let indexer_state = indexer::create_indexer_state(&state, path);
-    let result = indexer::update_codebase_index(&indexer_state, path).await?;
-    println!(
-        "{}",
-        json!({
-            "success": true,
-            "message": format!("Updated {}", path.display()),
-            "path": path.display().to_string(),
-            "files_indexed": result.files_processed,
-            "chunks_created": result.chunks_created,
-            "lexical_only": result.lexical_only,
-            "warnings": result.warnings,
-        })
-    );
-    Ok(0)
+    let outcome = indexer::update_codebase_index(&indexer_state, path).await;
+    let duration_ms = start.elapsed().as_millis() as u64;
+    match outcome {
+        Ok(result) => {
+            println!(
+                "{}",
+                json!({
+                    "success": true,
+                    "message": format!("Updated {}", path.display()),
+                    "path": path.display().to_string(),
+                    "files_indexed": result.files_processed,
+                    "chunks_created": result.chunks_created,
+                    "lexical_only": result.lexical_only,
+                    "warnings": result.warnings,
+                })
+            );
+            usage::log_index(IndexLog {
+                mode: "cli",
+                verb: "update",
+                repo: path,
+                files_processed: result.files_processed,
+                chunks_created: result.chunks_created,
+                duration_ms,
+                lexical_only: result.lexical_only,
+                error: None,
+            });
+            Ok(0)
+        }
+        Err(err) => {
+            let message = err.to_string();
+            usage::log_index(IndexLog {
+                mode: "cli",
+                verb: "update",
+                repo: path,
+                files_processed: 0,
+                chunks_created: 0,
+                duration_ms,
+                lexical_only: false,
+                error: Some(&message),
+            });
+            Err(err)
+        }
+    }
 }
 
 /// `search` verb: hybrid semantic+lexical search, print fused hits as JSON.
@@ -221,6 +292,50 @@ async fn cmd_search(
     limit: usize,
     extensions: Vec<String>,
 ) -> Result<i32> {
+    let start = Instant::now();
+    let outcome = perform_search(path, query, limit, extensions).await;
+    let duration_ms = start.elapsed().as_millis() as u64;
+    match outcome {
+        Ok((payload, metrics)) => {
+            let output_bytes = payload.len();
+            println!("{payload}");
+            usage::log_search(SearchLog {
+                mode: "cli",
+                repo: path,
+                query,
+                limit,
+                duration_ms,
+                metrics,
+                output_bytes,
+                error: None,
+            });
+            Ok(0)
+        }
+        Err(err) => {
+            let message = err.to_string();
+            usage::log_search(SearchLog {
+                mode: "cli",
+                repo: path,
+                query,
+                limit,
+                duration_ms,
+                metrics: HitMetrics::default(),
+                output_bytes: 0,
+                error: Some(&message),
+            });
+            Err(err)
+        }
+    }
+}
+
+/// The search core without output or telemetry: returns the serialized
+/// stdout payload plus the hit measurements for the usage log.
+async fn perform_search(
+    path: &Path,
+    query: &str,
+    limit: usize,
+    extensions: Vec<String>,
+) -> Result<(String, HitMetrics)> {
     let state = shared_state();
     let collection = collection_name_from_path(path);
 
@@ -262,6 +377,7 @@ async fn cmd_search(
         extension_filter: extensions,
     };
     let fused = fuse_hybrid_hits(query, vector_hits, lexical_hits, &options);
+    let metrics = usage::measure_hits(path, &fused);
     let results: Vec<serde_json::Value> = fused
         .into_iter()
         .map(|hit| {
@@ -276,8 +392,10 @@ async fn cmd_search(
             })
         })
         .collect();
-    println!("{}", json!({ "count": results.len(), "results": results }));
-    Ok(0)
+    Ok((
+        json!({ "count": results.len(), "results": results }).to_string(),
+        metrics,
+    ))
 }
 
 /// `status` verb: index status with live-rows reconciliation, as JSON.
@@ -406,6 +524,58 @@ async fn cmd_drop(collection: &str) -> Result<i32> {
     Ok(0)
 }
 
+async fn cmd_usage(rest: &[&String]) -> Result<i32> {
+    let mut since: Option<String> = None;
+    let mut repo: Option<String> = None;
+    let mut human = false;
+    let mut iter = rest.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--since" => {
+                let Some(value) = iter.next() else {
+                    return usage_error("--since needs a value");
+                };
+                since = Some((*value).clone());
+            }
+            "--repo" => {
+                let Some(value) = iter.next() else {
+                    return usage_error("--repo needs a value");
+                };
+                repo = Some((*value).clone());
+            }
+            "--human" => human = true,
+            other => {
+                return usage_error(&format!(
+                    "usage takes --since/--repo/--human, got '{other}'"
+                ));
+            }
+        }
+    }
+    let since_ms = match since.as_deref() {
+        None => None,
+        Some(spec) => match usage::parse_since(spec, usage::now_ms()) {
+            Some(bound) => Some(bound),
+            None => {
+                return usage_error(&format!(
+                    "invalid --since value '{spec}' (expected Nh/Nd/Nw/Ny, YYYY-MM-DD, or epoch)"
+                ));
+            }
+        },
+    };
+    let filter = usage::UsageFilter {
+        since_ms,
+        since_spec: since,
+        repo_contains: repo,
+    };
+    let report = usage::report_json(&filter);
+    if human {
+        println!("{}", usage::render_human(&report));
+    } else {
+        println!("{report}");
+    }
+    Ok(0)
+}
+
 /// Entry point for CLI mode. `args` excludes the program name and starts with
 /// a verb. Returns the process exit code. Usage mistakes return Ok(2);
 /// runtime failures propagate as Err (exit 1 in main).
@@ -494,7 +664,25 @@ pub async fn run(args: &[String]) -> Result<i32> {
             let (Some(path), Some(query)) = (path, query) else {
                 return usage_error("search takes <path> <query>");
             };
-            let resolved = directory_path(&path)?;
+            // Parity with the MCP tool: validation failures are logged as
+            // error searches too (they measure fallback-to-grep incidents).
+            let resolved = match directory_path(&path) {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    let message = err.to_string();
+                    usage::log_search(SearchLog {
+                        mode: "cli",
+                        repo: Path::new(&path),
+                        query: &query,
+                        limit,
+                        duration_ms: 0,
+                        metrics: HitMetrics::default(),
+                        output_bytes: 0,
+                        error: Some(&message),
+                    });
+                    return Err(err);
+                }
+            };
             cmd_search(&resolved, &query, limit, extensions).await
         }
         "status" | "clear" => {
@@ -531,6 +719,7 @@ pub async fn run(args: &[String]) -> Result<i32> {
                 cmd_drop(collection).await
             }
         }
+        "usage" => cmd_usage(&rest).await,
         _ => usage_error(&format!("unknown verb '{verb}'")),
     }
 }
@@ -578,6 +767,43 @@ mod tests {
     }
 
     /// A query starting with `-` after `--` is kept as the query, not a flag.
+    #[tokio::test]
+    async fn usage_verb_validates_flags() {
+        assert_eq!(run(&args(&["usage", "--bogus"])).await.unwrap(), 2);
+        assert_eq!(run(&args(&["usage", "--since"])).await.unwrap(), 2);
+        assert_eq!(run(&args(&["usage", "--repo"])).await.unwrap(), 2);
+        assert_eq!(run(&args(&["usage", "positional"])).await.unwrap(), 2);
+        assert_eq!(
+            run(&args(&["usage", "--since", "not-a-spec"]))
+                .await
+                .unwrap(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn usage_verb_reports_from_configured_log() {
+        let lock = crate::usage::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("usage.jsonl");
+        std::fs::write(
+            &log_path,
+            concat!(
+                r#"{"v":"0.1.0","ts_ms":1000,"ts":"1970-01-01T00:00:01Z","event":"search","mode":"cli","repo":"/r","query":"q","limit":5,"results":1,"excerpt_chars":10,"hit_files":1,"hit_file_bytes":800,"top_hit_file_bytes":800,"output_bytes":200,"duration_ms":5,"error":null}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        std::env::set_var(crate::usage::USAGE_LOG_ENV, log_path.to_str().unwrap());
+
+        let code = run(&args(&["usage"])).await.unwrap();
+        std::env::remove_var(crate::usage::USAGE_LOG_ENV);
+        drop(lock);
+        assert_eq!(code, 0);
+    }
+
     #[tokio::test]
     async fn query_starting_with_dash_after_separator_is_kept() {
         // Path does not exist, so this is a runtime error (exit via Err),

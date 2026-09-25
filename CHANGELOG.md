@@ -23,6 +23,20 @@ All notable changes to `rust_sindexer` will be documented in this file.
   `drop` on a missing collection reports `success:false` and exits 1. No
   arguments still launches the MCP stdio server; unknown commands error.
 
+- Usage telemetry: every search (CLI `search` verb and MCP `search_code`
+  tool, including path-validation failures) and every index/update run
+  appends one best-effort JSON line to `~/.context/usage/sindexer.jsonl`
+  (`SINDEXER_USAGE_LOG` overrides the path, `SINDEXER_USAGE_LOG=0`
+  disables; test binaries never touch the default path). Search events
+  record the measured output payload size, excerpt volume, and the on-disk
+  size of the hit files; index events record files/chunks/duration. The new
+  `usage` verb aggregates the log into token-savings estimates — search
+  output tokens versus grep-flow baselines of reading the hit files in full
+  (all hits and top hit only) — plus zero-result/error rates and per-repo
+  breakdowns. `--since Nh|Nd|Nw|Ny|YYYY-MM-DD|epoch`, `--repo TEXT`, and
+  `--human` filter and format the report; tokens are estimated as bytes/4
+  and the methodology ships inside every report.
+
 ### Changed
 
 - Batch vector writes use the Milvus `upsert` endpoint (parity with
