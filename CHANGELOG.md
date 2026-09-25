@@ -4,6 +4,25 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Native CLI mode: `sindexer <verb> [args]` with `index`, `update`, `search`,
+  `status`, `clear`, `collections`, `stats`, and `drop`. Verbs share the exact
+  indexing/search cores with the MCP tool layer (`create_indexer_state` and
+  the live-rows helpers moved from tools.rs to indexer.rs for both paths).
+  Paths may be relative and are absolutized without resolving symlinks, so
+  CLI and MCP modes key the same collection for the same path string;
+  `clear` works on deleted paths (orphan cleanup) while `index`/`update`/
+  `search`/`status` validate existence (and directory-ness for the first
+  three). Output is compact JSON on stdout, including `warnings` and
+  `lexical_only` for index/update. For the embedding verbs only, when
+  `EMBEDDING_URL` is unset, `SINDEXER_AUTO_EMBEDDING` is not `0`, and
+  127.0.0.1:1234 accepts connections, `EMBEDDING_URL` defaults to
+  `http://127.0.0.1:1234/v1` — resolved before the async runtime starts.
+  Usage mistakes (unknown flags, extra positionals, missing values) exit 2;
+  `drop` on a missing collection reports `success:false` and exits 1. No
+  arguments still launches the MCP stdio server; unknown commands error.
+
 ### Changed
 
 - Batch vector writes use the Milvus `upsert` endpoint (parity with
@@ -12,6 +31,12 @@ All notable changes to `rust_sindexer` will be documented in this file.
   `upsertCount` and `insertCount`.
 
 ### Fixed
+
+- The local-embedding probe uses a 1-second connect timeout and parses the
+  first JSON value from the response, so chunked transfer encoding no longer
+  silently disables the auto-default embedding endpoint.
+- The CLI-mode tokio runtime is dropped before `std::process::exit`, so
+  destructors run on exit instead of being skipped by the direct exit call.
 
 - `update_index` now self-heals a missing or incompatible per-codebase manifest
   or vector collection by rebuilding only that scoped index. Unrelated
@@ -40,14 +65,13 @@ All notable changes to `rust_sindexer` will be documented in this file.
   locations, and added an on-disk layout section. `PARALLELISM` is parsed but
   not yet wired to the walker or rayon, so it stays undocumented.
 
-### Added
 
 - Added separate query and passage prefix settings for task-aware embedding
   models, including calibrated Jina code embeddings.
 - The binary now accepts `-h`/`--help` and `-V`/`--version`, printing usage
-  (with MCP registration examples) and the crate version respectively.
-  Unknown arguments are still ignored, so existing MCP client launches are
-  unaffected.
+  and the crate version respectively. As of the native CLI mode, unknown
+  arguments exit with status 2 instead of being ignored: MCP client configs
+  that pass extra launch arguments must be updated (breaking).
 - Added the `update_index` MCP tool for incremental-only refreshes of an
   existing compatible codebase index. It touches only changed/deleted files and
   fails instead of falling back to a full rebuild when the manifest or backing

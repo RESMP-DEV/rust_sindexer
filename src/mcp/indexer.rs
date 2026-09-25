@@ -16,13 +16,100 @@ use tokio::task;
 use tracing::{debug, info, instrument, warn};
 
 use super::manifest::{diff_manifest_against_files, FileFingerprint, IndexInputs, ManifestStore};
-use crate::embedding::Embedder;
+use super::state::SharedState;
+use crate::embedding::{Embedder, EmbeddingClient, EmbeddingConfig};
 use crate::lexical::LexicalIndex;
-use crate::splitter::CodeSplitter;
+use crate::splitter::{CodeSplitter, Config as SplitterConfig};
 use crate::types::{CodeChunk, EmbeddingVector, IndexState, IndexStatus};
 use crate::vectordb::client::milvus_id_for_chunk_id;
-use crate::vectordb::{collection_name_from_path, InsertRow, VectorStore};
+use crate::vectordb::{
+    collection_name_from_path, InsertRow, LocalStore, MilvusClient, VectorStore,
+};
 use crate::walker::CodeWalker;
+
+/// Live-rows reconciliation helpers shared by the MCP wrappers and the CLI
+/// verbs, so the two paths cannot drift (see tools.rs / cli.rs call sites).
+/// Whether `status` alone justifies querying live row counts: idle, or a
+/// completed status whose counters never left zero.
+pub fn should_request_live_rows(status: &IndexStatus) -> bool {
+    match status.status {
+        IndexState::Idle => true,
+        IndexState::Completed => {
+            status.vectors_inserted == 0
+                || status.embeddings_generated == 0
+                || status.total_chunks == 0
+        }
+        IndexState::Indexing | IndexState::Failed => false,
+    }
+}
+
+/// Whether freshly fetched live rows may be folded into `status`: only idle
+/// or completed states qualify, and a completed status accepts them when the
+/// request originated from idle or its counters never left zero.
+pub fn can_apply_live_rows(status: &IndexStatus, requested_from_idle: bool) -> bool {
+    match status.status {
+        IndexState::Idle => true,
+        IndexState::Completed => {
+            requested_from_idle
+                || status.vectors_inserted == 0
+                || status.embeddings_generated == 0
+                || status.total_chunks == 0
+        }
+        IndexState::Indexing | IndexState::Failed => false,
+    }
+}
+
+/// Convert a u64 live row count to usize, saturating at `usize::MAX`.
+pub fn checked_live_row_count(row_count: u64) -> usize {
+    match usize::try_from(row_count) {
+        Ok(count) => count,
+        Err(_) => {
+            tracing::warn!(row_count, "live row count exceeds usize; capping");
+            usize::MAX
+        }
+    }
+}
+
+/// Build a per-run IndexerState from the shared state (splitter sized from
+/// config, embedder + vector store matching the configured backends).
+pub fn create_indexer_state(state: &SharedState, root_path: &Path) -> Arc<IndexerState> {
+    let config = &state.config;
+    let splitter = CodeSplitter::new(SplitterConfig {
+        root_path: root_path.to_path_buf(),
+        max_chunk_bytes: config.chunk_size,
+        overlap_lines: config.chunk_overlap / 80,
+        ..SplitterConfig::default()
+    });
+
+    let embedder = if state.embedder.is_enabled() {
+        let rate_limiter =
+            crate::embedding::RateLimiter::new(config.embedding_rpm, config.embedding_tpm);
+        Embedder::Http(EmbeddingClient::with_rate_limiter(
+            EmbeddingConfig::from_config(config),
+            rate_limiter,
+        ))
+    } else {
+        Embedder::Disabled
+    };
+
+    let vector_store = if matches!(state.vector_store, VectorStore::Milvus(_)) {
+        VectorStore::Milvus(MilvusClient::new(
+            &config.milvus_url,
+            config.milvus_token.clone(),
+        ))
+    } else {
+        VectorStore::Local(LocalStore::new())
+    };
+
+    Arc::new(IndexerState::with_concurrency(
+        CodeWalker::from_config(config),
+        splitter,
+        embedder,
+        vector_store,
+        config.embedding_dimension,
+        config.concurrency,
+    ))
+}
 
 const EMBEDDING_BATCH_SIZE: usize = 32;
 const MILVUS_BATCH_SIZE: usize = 500;

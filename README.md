@@ -100,8 +100,9 @@ cargo install --path .
 
 ## Quickstart
 
-The binary is an MCP *server*: it communicates over stdin/stdout and is
-launched by an MCP client. You don't interact with it like a normal CLI.
+The binary is dual-mode: with no arguments it is an MCP *server* over
+stdin/stdout launched by an MCP client; with a verb it is a normal CLI (see
+[CLI mode](#cli-mode-no-mcp-client-required) below).
 
 ### 1. Register it with your AI tool
 
@@ -159,6 +160,33 @@ cargo build --release
 ```
 
 ## Usage
+
+### CLI mode (no MCP client required)
+
+The binary is dual-mode: verbs run as a plain CLI, no arguments launch the
+MCP stdio server.
+
+```bash
+sindexer index /abs/or/relative/project        # index (full build if needed)
+sindexer update project                       # incremental update
+sindexer search project "query" --limit 5      # hybrid semantic+lexical
+sindexer status project                       # indexing status
+sindexer clear project                        # remove the index
+sindexer collections                          # what is indexed, row counts
+sindexer stats <collection> | drop <collection>
+```
+
+Output is compact JSON on stdout (logs go to stderr). For `index`, `update`,
+and `search`, when neither `EMBEDDING_URL` nor `OPENAI_BASE_URL` is set and an
+OpenAI-compatible embedding server returns a valid `/v1/embeddings` response
+on 127.0.0.1:1234, the CLI uses it and sets `EMBEDDING_DIMENSION` to the
+measured vector length. Set `SINDEXER_AUTO_EMBEDDING=0` to disable this and
+stay lexical-only. Auto-discovery trusts whatever answers on that port; for
+sensitive indexing, set an explicit `EMBEDDING_URL`. Paths shared between CLI
+and MCP modes need consistent explicit embedding configuration — an
+embedding-dimension change deliberately invalidates the index manifest and
+triggers a full rebuild.
+
 
 ### MCP tools
 

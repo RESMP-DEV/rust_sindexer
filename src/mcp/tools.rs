@@ -1,7 +1,7 @@
 //! MCP tool definitions for codebase indexing and semantic search.
 
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rmcp::{
@@ -20,17 +20,16 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::task;
 use tokio::time::{sleep, Duration};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use super::hybrid::{fuse_hybrid_hits, HybridFusionOptions, HybridHit};
-use super::indexer::{self, IndexerState};
+use super::indexer::{
+    self, can_apply_live_rows, checked_live_row_count, should_request_live_rows, IndexerState,
+};
 use super::state::{create_default_shared_state, SharedState};
-use crate::embedding::{Embedder, EmbeddingClient, EmbeddingConfig};
 use crate::lexical::LexicalIndex;
-use crate::splitter::{CodeSplitter, Config as SplitterConfig};
 use crate::types::{IndexState, IndexStatus};
-use crate::vectordb::{collection_name_from_path, LocalStore, MilvusClient, VectorStore};
-use crate::walker::CodeWalker;
+use crate::vectordb::collection_name_from_path;
 
 // ============================================================================
 // Tool Input Schemas
@@ -70,83 +69,6 @@ pub struct SearchCodeParams {
 
 fn default_limit() -> u32 {
     10
-}
-
-fn create_indexer_state(state: &SharedState, root_path: &Path) -> Arc<IndexerState> {
-    let config = &state.config;
-    let splitter = CodeSplitter::new(SplitterConfig {
-        root_path: root_path.to_path_buf(),
-        max_chunk_bytes: config.chunk_size,
-        overlap_lines: config.chunk_overlap / 80,
-        ..SplitterConfig::default()
-    });
-
-    let embedder = if state.embedder.is_enabled() {
-        let rate_limiter =
-            crate::embedding::RateLimiter::new(config.embedding_rpm, config.embedding_tpm);
-        Embedder::Http(EmbeddingClient::with_rate_limiter(
-            EmbeddingConfig::from_config(config),
-            rate_limiter,
-        ))
-    } else {
-        Embedder::Disabled
-    };
-
-    let vector_store = if matches!(state.vector_store, VectorStore::Milvus(_)) {
-        VectorStore::Milvus(MilvusClient::new(
-            &config.milvus_url,
-            config.milvus_token.clone(),
-        ))
-    } else {
-        VectorStore::Local(LocalStore::new())
-    };
-
-    Arc::new(IndexerState::with_concurrency(
-        CodeWalker::from_config(config),
-        splitter,
-        embedder,
-        vector_store,
-        config.embedding_dimension,
-        config.concurrency,
-    ))
-}
-
-fn should_request_live_rows(status: &IndexStatus) -> bool {
-    match status.status {
-        IndexState::Idle => true,
-        IndexState::Completed => {
-            status.vectors_inserted == 0
-                || status.embeddings_generated == 0
-                || status.total_chunks == 0
-        }
-        IndexState::Indexing | IndexState::Failed => false,
-    }
-}
-
-fn can_apply_live_rows(status: &IndexStatus, requested_from_idle: bool) -> bool {
-    match status.status {
-        IndexState::Idle => true,
-        IndexState::Completed => {
-            requested_from_idle
-                || status.vectors_inserted == 0
-                || status.embeddings_generated == 0
-                || status.total_chunks == 0
-        }
-        IndexState::Indexing | IndexState::Failed => false,
-    }
-}
-
-fn checked_live_row_count(row_count: u64) -> usize {
-    match usize::try_from(row_count) {
-        Ok(count) => count,
-        Err(_) => {
-            warn!(
-                row_count,
-                "Milvus row count exceeds this platform's usize; capping status counters"
-            );
-            usize::MAX
-        }
-    }
 }
 
 fn mirror_index_status(
@@ -449,7 +371,7 @@ impl CodebaseTools {
             )));
         }
 
-        let indexer_state = create_indexer_state(&self.state, &path);
+        let indexer_state = indexer::create_indexer_state(&self.state, &path);
         self.state.indexing_status.insert(
             path.clone(),
             IndexStatus {
@@ -518,7 +440,7 @@ impl CodebaseTools {
             )));
         }
 
-        let indexer_state = create_indexer_state(&self.state, &path);
+        let indexer_state = indexer::create_indexer_state(&self.state, &path);
         self.state.indexing_status.insert(
             path.clone(),
             IndexStatus {
@@ -884,6 +806,8 @@ mod tests {
     };
     use crate::lexical::test_support::set_test_cache_dir_async;
     use crate::mcp::state::create_shared_state_with_components;
+    use crate::splitter::{CodeSplitter, Config as SplitterConfig};
+    use crate::walker::CodeWalker;
 
     struct MockHttpServer {
         base_url: String,
