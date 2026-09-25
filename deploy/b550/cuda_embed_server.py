@@ -12,7 +12,7 @@ from typing import Literal
 
 import torch
 import torch.nn.functional as F
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from safetensors import safe_open
@@ -70,7 +70,7 @@ def _replace_parameter(root: nn.Module, name: str, value: torch.Tensor) -> None:
     parent = root
     for part in parts[:-1]:
         parent = getattr(parent, part)
-    parent._parameters[parts[-1]] = nn.Parameter(value, requires_grad=False)
+    setattr(parent, parts[-1], nn.Parameter(value, requires_grad=False))
 
 
 class Mxfp4Linear(nn.Module):
@@ -253,23 +253,60 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Jina Code CUDA MXFP4", version="1.0.0", lifespan=lifespan)
 
 
-@app.middleware("http")
-async def limit_request_body(request: Request, call_next):
-    """Reject requests whose declared body exceeds MAX_REQUEST_BYTES with 413."""
-    raw_length = request.headers.get("content-length")
-    if raw_length is not None and raw_length.isdigit():
-        content_length = int(raw_length)
-        if content_length > MAX_REQUEST_BYTES:
-            return JSONResponse(
-                status_code=413,
-                content={
-                    "detail": (
-                        f"request body {content_length} bytes exceeds "
-                        f"maximum {MAX_REQUEST_BYTES}"
+class RequestBodyLimitMiddleware:
+    """Reject bodies over ``max_bytes`` with 413, chunked or content-sized.
+
+    The declared content-length is checked first so oversized requests are
+    refused before a byte is read; the wrapped receive channel then counts
+    streamed http.request chunks, so Transfer-Encoding: chunked cannot
+    bypass the limit by omitting the header.
+    """
+
+    def __init__(self, app, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = dict(scope.get("headers") or [])
+        raw_length = headers.get(b"content-length")
+        if raw_length is not None and raw_length.isdigit():
+            content_length = int(raw_length)
+            if content_length > self.max_bytes:
+                response = JSONResponse(
+                    status_code=413,
+                    content={
+                        "detail": (
+                            f"request body {content_length} bytes exceeds "
+                            f"maximum {self.max_bytes}"
+                        )
+                    },
+                )
+                await response(scope, receive, send)
+                return
+        received = 0
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body") or b"")
+                if received > self.max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            f"request body exceeds maximum "
+                            f"{self.max_bytes} bytes"
+                        ),
                     )
-                },
-            )
-    return await call_next(request)
+            return message
+
+        await self.app(scope, limited_receive, send)
+
+
+app.add_middleware(RequestBodyLimitMiddleware, max_bytes=MAX_REQUEST_BYTES)
 
 
 @app.get("/health")

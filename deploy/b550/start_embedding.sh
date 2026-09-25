@@ -40,8 +40,13 @@ export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-1}"
 export NVCC_THREADS="${NVCC_THREADS:-1}"
 export TORCHINDUCTOR_COMPILE_THREADS="${TORCHINDUCTOR_COMPILE_THREADS:-1}"
 
+# Interpreter defaults to the service-root venv that PYTHONPATH below points
+# at; RUST_INDEXER_PYTHON_BIN overrides it for hosts where the venv lives
+# elsewhere (the B550 bringup checkout venv predates the service layout).
+python_bin="${RUST_INDEXER_PYTHON_BIN:-$service_root/.venv/bin/python}"
+
 echo "selected_gpu_uuid=$best_uuid free_mib=$best_free"
-exec /home/kearm/AlphaHENG-cuda-bringup/.venv/bin/python -m uvicorn \
+exec "$python_bin" -m uvicorn \
 	cuda_embed_server:app \
 	--app-dir "$service_root/runtime" \
 	--host 127.0.0.1 \
