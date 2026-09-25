@@ -6,6 +6,18 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ### Added
 
+- B550 deployment kit (`deploy/b550`): direct CUDA MXFP4 Jina embeddings,
+  remote Milvus persistence, automatic selection of the 3090 Ti with the
+  most free VRAM, and a loopback-only SSH tunnel from the Mac. Review
+  hardening carried over: MinIO is not published on host ports and its
+  credentials live in an untracked `deploy/b550/.env` (see `.env.example`);
+  the embedding server rejects oversized request bodies and individual
+  inputs with HTTP 413 before tokenization — the body limit counts streamed
+  chunks, so `Transfer-Encoding: chunked` cannot bypass it; and both systemd
+  units gate on real readiness (ExecStartPost `/health` poll;
+  `docker compose up -d --wait`). Ported from the retired rust-indexer
+  repository (PR rust-indexer#3).
+
 - Native CLI mode: `sindexer <verb> [args]` with `index`, `update`, `search`,
   `status`, `clear`, `collections`, `stats`, and `drop`. Verbs share the exact
   indexing/search cores with the MCP tool layer (`create_indexer_state` and

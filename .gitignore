@@ -27,3 +27,9 @@ agent_workspace/
 logs/
 reports/
 tasks/
+
+# Python bytecode in deployment kits
+__pycache__/
+
+# B550 deployment secrets
+deploy/b550/.env

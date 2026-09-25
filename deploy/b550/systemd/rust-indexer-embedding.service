@@ -1,0 +1,30 @@
+[Unit]
+Description=Rust Indexer Jina CUDA MXFP4 embedding service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kearm
+Group=kearm
+WorkingDirectory=/home/kearm/services/rust-indexer
+Environment=RUST_INDEXER_SERVICE_ROOT=/home/kearm/services/rust-indexer
+Environment=HF_HOME=/home/kearm/.cache/huggingface
+Environment=TORCHINDUCTOR_CACHE_DIR=/home/kearm/.cache/torchinductor/rust-indexer
+Environment=TRITON_CACHE_DIR=/home/kearm/.cache/triton/rust-indexer
+ExecStart=/home/kearm/services/rust-indexer/runtime/start_embedding.sh
+# Gate readiness on /health answering (port matches start_embedding.sh).
+# Each pass is a 5s probe plus a 5s sleep; 80 passes bound the poll at
+# roughly 800s, inside TimeoutStartSec=900, so a stalled init fails the
+# start and Restart=on-failure engages. "$$" escapes to "$" for /bin/sh.
+ExecStartPost=/bin/sh -c 'i=0; while [ "$$i" -lt 80 ]; do python3 -c "import urllib.request,sys; urllib.request.urlopen(\"http://127.0.0.1:1235/health\", timeout=5)" && exit 0; i=$$((i+1)); sleep 5; done; echo "readiness probe timed out" >&2; exit 1'
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=900
+TimeoutStopSec=30
+MemoryHigh=32G
+MemoryMax=48G
+OOMPolicy=stop
+
+[Install]
+WantedBy=multi-user.target
