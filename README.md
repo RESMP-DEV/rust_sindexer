@@ -171,9 +171,10 @@ sindexer index /abs/or/relative/project        # index (full build if needed)
 sindexer update project                       # incremental update
 sindexer search project "query" --limit 5      # hybrid semantic+lexical
 sindexer status project                       # indexing status
-sindexer clear project                        # remove the index
+sindexer clear project                       # remove the index
 sindexer collections                          # what is indexed, row counts
 sindexer stats <collection> | drop <collection>
+sindexer usage --human [--since 7d] [--repo TEXT]  # token-savings report
 ```
 
 Output is compact JSON on stdout (logs go to stderr). For `index`, `update`,
@@ -186,6 +187,17 @@ sensitive indexing, set an explicit `EMBEDDING_URL`. Paths shared between CLI
 and MCP modes need consistent explicit embedding configuration — an
 embedding-dimension change deliberately invalidates the index manifest and
 triggers a full rebuild.
+
+### Usage telemetry
+
+Every search (CLI and MCP) and every index/update run appends one JSON event
+to `~/.context/usage/sindexer.jsonl` — best-effort, never fails the command.
+`SINDEXER_USAGE_LOG` overrides the path, `SINDEXER_USAGE_LOG=0` disables.
+`sindexer usage [--since Nh|Nd|Nw|Ny|YYYY-MM-DD|epoch] [--repo TEXT]
+[--human]` aggregates the log into token-savings estimates: the measured
+output payload agents read, versus grep-flow baselines of reading the hit
+files in full (all hits, or just the top hit). Zero-result and error rates
+are reported too — they measure how often the index falls back to grep.
 
 
 ### MCP tools

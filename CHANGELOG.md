@@ -23,6 +23,20 @@ All notable changes to `rust_sindexer` will be documented in this file.
   `drop` on a missing collection reports `success:false` and exits 1. No
   arguments still launches the MCP stdio server; unknown commands error.
 
+- Usage telemetry: every search (CLI `search` verb and MCP `search_code`
+  tool, including path-validation failures) and every index/update run
+  appends one best-effort JSON line to `~/.context/usage/sindexer.jsonl`
+  (`SINDEXER_USAGE_LOG` overrides the path, `SINDEXER_USAGE_LOG=0`
+  disables; test binaries never touch the default path). Search events
+  record the measured output payload size, excerpt volume, and the on-disk
+  size of the hit files; index events record files/chunks/duration. The new
+  `usage` verb aggregates the log into token-savings estimates — search
+  output tokens versus grep-flow baselines of reading the hit files in full
+  (all hits and top hit only) — plus zero-result/error rates and per-repo
+  breakdowns. `--since Nh|Nd|Nw|Ny|YYYY-MM-DD|epoch`, `--repo TEXT`, and
+  `--human` filter and format the report; tokens are estimated as bytes/4
+  and the methodology ships inside every report.
+
 ### Changed
 
 - Batch vector writes use the Milvus `upsert` endpoint (parity with
@@ -37,6 +51,13 @@ All notable changes to `rust_sindexer` will be documented in this file.
   silently disables the auto-default embedding endpoint.
 - The CLI-mode tokio runtime is dropped before `std::process::exit`, so
   destructors run on exit instead of being skipped by the direct exit call.
+- Usage-log default path now falls back to `USERPROFILE` when `HOME` is
+  unset, so telemetry no longer silently stays off on Windows.
+- Pre-1970 `--since` dates (e.g. `1969-12-31`) clamp to match-everything
+  instead of erroring as invalid `--since` values.
+- The `usage` report streams the log line-by-line instead of loading it
+  whole, and the MCP telemetry measures payload size without building the
+  serialized string.
 
 - `update_index` now self-heals a missing or incompatible per-codebase manifest
   or vector collection by rebuilding only that scoped index. Unrelated

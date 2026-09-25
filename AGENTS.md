@@ -84,6 +84,7 @@ Supported AST languages: Python, JavaScript, TypeScript, TSX, Rust, Go, Java, C+
 - `src/mcp/hybrid.rs` — hybrid search (semantic + lexical fusion)
 - `src/mcp/manifest.rs` — index manifest for incremental reindexing
 - `src/mcp/tools.rs` — MCP tool definitions and JSON schemas
+- `src/usage.rs` — usage telemetry (JSONL event log + `usage` verb report)
 - `src/vectordb/local.rs` — brute-force local vector store with disk persistence
 - `src/vectordb/client.rs` — Milvus/Zilliz REST API client
 

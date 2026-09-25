@@ -1,7 +1,8 @@
 //! MCP tool definitions for codebase indexing and semantic search.
 
 use std::future::Future;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rmcp::{
@@ -69,6 +70,40 @@ pub struct SearchCodeParams {
 
 fn default_limit() -> u32 {
     10
+}
+
+/// Counts bytes written without buffering them, so the MCP telemetry wrapper
+/// can measure the serialized payload size without building the full string.
+struct Counter(usize);
+
+impl Write for Counter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Best-effort usage event for an MCP index/update tool call, mirroring the
+/// CLI verbs' telemetry so both modes land in the same log.
+fn log_mcp_index_usage(
+    verb: &str,
+    path: &Path,
+    started: std::time::Instant,
+    result: &anyhow::Result<indexer::IndexResult>,
+) {
+    crate::usage::log_index(crate::usage::IndexLog {
+        mode: "mcp",
+        verb,
+        repo: path,
+        files_processed: result.as_ref().map(|r| r.files_processed).unwrap_or(0),
+        chunks_created: result.as_ref().map(|r| r.chunks_created).unwrap_or(0),
+        duration_ms: started.elapsed().as_millis() as u64,
+        lexical_only: result.as_ref().map(|r| r.lexical_only).unwrap_or(false),
+        error: result.as_ref().err().map(|err| err.to_string()).as_deref(),
+    });
 }
 
 fn mirror_index_status(
@@ -385,8 +420,10 @@ impl CodebaseTools {
         );
         let status_mirror =
             mirror_index_status(self.state.clone(), indexer_state.clone(), path.clone());
+        let started = std::time::Instant::now();
         let result = indexer::index_codebase(&indexer_state, &path, params.force).await;
         let _ = status_mirror.await;
+        log_mcp_index_usage("index", &path, started, &result);
         let result = result.map_err(|err| McpError::internal_error(err.to_string(), None))?;
 
         let mode_hint = if result.lexical_only {
@@ -454,8 +491,10 @@ impl CodebaseTools {
         );
         let status_mirror =
             mirror_index_status(self.state.clone(), indexer_state.clone(), path.clone());
+        let started = std::time::Instant::now();
         let result = indexer::update_codebase_index(&indexer_state, &path).await;
         let _ = status_mirror.await;
+        log_mcp_index_usage("update", &path, started, &result);
         let result = result.map_err(|err| McpError::internal_error(err.to_string(), None))?;
 
         let mode_hint = if result.lexical_only {
@@ -502,6 +541,51 @@ impl CodebaseTools {
     ) -> Result<Json<SearchResults>, McpError> {
         let params = params.0;
         info!(path = %params.path, query = %params.query, limit = params.limit, "search_code called");
+        let started = std::time::Instant::now();
+        let outcome = self.run_search_code(&params).await;
+        let duration_ms = started.elapsed().as_millis() as u64;
+        match outcome {
+            Ok((results, path, metrics)) => {
+                let mut counter = Counter(0);
+                let output_bytes = serde_json::to_writer(&mut counter, &results)
+                    .map(|_| counter.0)
+                    .unwrap_or(0);
+                crate::usage::log_search(crate::usage::SearchLog {
+                    mode: "mcp",
+                    repo: &path,
+                    query: &params.query,
+                    limit: params.limit as usize,
+                    duration_ms,
+                    metrics,
+                    output_bytes,
+                    error: None,
+                });
+                info!(result_count = results.count, "search_code completed");
+                Ok(Json(results))
+            }
+            Err(err) => {
+                let message = err.to_string();
+                crate::usage::log_search(crate::usage::SearchLog {
+                    mode: "mcp",
+                    repo: Path::new(&params.path),
+                    query: &params.query,
+                    limit: params.limit as usize,
+                    duration_ms,
+                    metrics: crate::usage::HitMetrics::default(),
+                    output_bytes: 0,
+                    error: Some(&message),
+                });
+                Err(err)
+            }
+        }
+    }
+
+    /// Search core shared with the telemetry wrapper above: returns the
+    /// results plus the validated path and hit measurements for the log.
+    async fn run_search_code(
+        &self,
+        params: &SearchCodeParams,
+    ) -> Result<(SearchResults, PathBuf, crate::usage::HitMetrics), McpError> {
         let path = validate_directory_path(&params.path)?;
 
         // Validate limit
@@ -556,6 +640,7 @@ impl CodebaseTools {
             extension_filter: params.extensions.clone(),
         };
         let fused_hits = fuse_hybrid_hits(&params.query, vector_hits, lexical_hits, &options);
+        let metrics = crate::usage::measure_hits(&path, &fused_hits);
 
         let results = fused_hits
             .into_iter()
@@ -570,11 +655,14 @@ impl CodebaseTools {
             })
             .collect::<Vec<_>>();
 
-        info!(result_count = results.len(), "search_code completed");
-        Ok(Json(SearchResults {
-            count: results.len(),
-            results,
-        }))
+        Ok((
+            SearchResults {
+                count: results.len(),
+                results,
+            },
+            path,
+            metrics,
+        ))
     }
 
     /// Get the current indexing status for a codebase.
