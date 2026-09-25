@@ -1,6 +1,7 @@
 //! MCP tool definitions for codebase indexing and semantic search.
 
 use std::future::Future;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -69,6 +70,20 @@ pub struct SearchCodeParams {
 
 fn default_limit() -> u32 {
     10
+}
+
+/// Counts bytes written without buffering them, so the MCP telemetry wrapper
+/// can measure the serialized payload size without building the full string.
+struct Counter(usize);
+
+impl Write for Counter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Best-effort usage event for an MCP index/update tool call, mirroring the
@@ -531,8 +546,9 @@ impl CodebaseTools {
         let duration_ms = started.elapsed().as_millis() as u64;
         match outcome {
             Ok((results, path, metrics)) => {
-                let output_bytes = serde_json::to_string(&results)
-                    .map(|text| text.len())
+                let mut counter = Counter(0);
+                let output_bytes = serde_json::to_writer(&mut counter, &results)
+                    .map(|_| counter.0)
                     .unwrap_or(0);
                 crate::usage::log_search(crate::usage::SearchLog {
                     mode: "mcp",

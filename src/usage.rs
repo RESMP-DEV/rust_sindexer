@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -162,6 +162,7 @@ fn usage_log_disabled() -> bool {
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
 }
@@ -293,7 +294,15 @@ pub fn parse_since(spec: &str, now_ms: u64) -> Option<u64> {
         if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
             return None;
         }
-        let ms = (days_from_civil(year, month, day) as u64).checked_mul(86_400_000)?;
+        // Pre-epoch dates (negative days) clamp to zero: matching everything
+        // beats failing on a valid-looking date, per the documented clamp
+        // semantics.
+        let days = days_from_civil(year, month, day);
+        let ms = if days < 0 {
+            0
+        } else {
+            (days as u64).checked_mul(86_400_000)?
+        };
         return Some(ms.min(now_ms));
     }
     None
@@ -327,28 +336,6 @@ pub fn report_json(filter: &UsageFilter) -> Value {
         });
     };
 
-    let (parsed, skipped, events) = match std::fs::read_to_string(&path) {
-        Ok(contents) => {
-            let mut parsed = 0u64;
-            let mut skipped = 0u64;
-            let mut events = Vec::new();
-            for line in contents.lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                match serde_json::from_str::<Value>(line) {
-                    Ok(event) => {
-                        parsed += 1;
-                        events.push(event);
-                    }
-                    Err(_) => skipped += 1,
-                }
-            }
-            (parsed, skipped, events)
-        }
-        Err(_) => (0, 0, Vec::new()),
-    };
-
     let matches = |event: &Value| -> bool {
         if let Some(since) = filter.since_ms {
             if event.get("ts_ms").and_then(Value::as_u64).unwrap_or(0) < since {
@@ -362,6 +349,37 @@ pub fn report_json(filter: &UsageFilter) -> Value {
             }
         }
         true
+    };
+
+    // Stream the log line-by-line instead of loading it whole: each line is
+    // parsed and immediately filtered, so only matched events are retained.
+    // Unreadable lines count as skipped; a missing file yields a zeroed run.
+    let (parsed, skipped, events) = match std::fs::File::open(&path) {
+        Ok(file) => {
+            let mut parsed = 0u64;
+            let mut skipped = 0u64;
+            let mut events = Vec::new();
+            for line in BufReader::new(file).lines() {
+                let Ok(line) = line else {
+                    skipped += 1;
+                    continue;
+                };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<Value>(&line) {
+                    Ok(event) => {
+                        parsed += 1;
+                        if matches(&event) {
+                            events.push(event);
+                        }
+                    }
+                    Err(_) => skipped += 1,
+                }
+            }
+            (parsed, skipped, events)
+        }
+        Err(_) => (0, 0, Vec::new()),
     };
 
     #[derive(Default)]
@@ -858,6 +876,9 @@ mod tests {
         assert_eq!(parse_since("9999-12-31", now), Some(now)); // future clamps
         let expected = (days_from_civil(2026, 9, 1) as u64) * 86_400_000;
         assert_eq!(parse_since("2026-09-01", now), Some(expected));
+        // Pre-epoch dates clamp to zero (match everything), never wrap.
+        assert_eq!(parse_since("1969-12-31", now), Some(0));
+        assert_eq!(parse_since("1900-01-01", now), Some(0));
         assert_eq!(parse_since("nonsense", now), None);
         assert_eq!(parse_since("2026-13-01", now), None);
         assert_eq!(parse_since("2026-09-32", now), None);

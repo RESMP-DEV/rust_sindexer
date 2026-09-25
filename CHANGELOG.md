@@ -51,6 +51,13 @@ All notable changes to `rust_sindexer` will be documented in this file.
   silently disables the auto-default embedding endpoint.
 - The CLI-mode tokio runtime is dropped before `std::process::exit`, so
   destructors run on exit instead of being skipped by the direct exit call.
+- Usage-log default path now falls back to `USERPROFILE` when `HOME` is
+  unset, so telemetry no longer silently stays off on Windows.
+- Pre-1970 `--since` dates (e.g. `1969-12-31`) clamp to match-everything
+  instead of erroring as invalid `--since` values.
+- The `usage` report streams the log line-by-line instead of loading it
+  whole, and the MCP telemetry measures payload size without building the
+  serialized string.
 
 - `update_index` now self-heals a missing or incompatible per-codebase manifest
   or vector collection by rebuilding only that scoped index. Unrelated
