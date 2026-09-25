@@ -46,6 +46,11 @@ after editing it.
 
 ## Conventions kept on purpose
 
+- Paths are host-specific by design: launchd `ProgramArguments` cannot
+  expand `$HOME`, so the plist carries absolute paths and must be edited
+  for a different user or machine before install. The doctor's REPOS list
+  is `$HOME`-relative but describes this fleet's layout; adjust it for a
+  different checkout topology.
 - Both scripts pin `#!/bin/bash` (macOS system bash 3.2): it is the one
   interpreter guaranteed to exist in LaunchAgent and cron contexts, where
   Homebrew's tree is not on PATH. Keep them 3.2-clean (no associative

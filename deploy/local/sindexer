@@ -10,6 +10,7 @@ env_file="$HOME/.context/.env"
 bin=/usr/local/bin/sindexer
 if [ -r "$env_file" ]; then
   saved=$(mktemp)
+  trap 'rm -f "$saved"' EXIT
   for k in EMBEDDING_URL OPENAI_BASE_URL EMBEDDING_MODEL EMBEDDING_API_KEY \
            OPENAI_API_KEY EMBEDDING_QUERY_PREFIX EMBEDDING_PASSAGE_PREFIX \
            EMBEDDING_DIMENSION EMBEDDING_BATCH_SIZE MILVUS_URL MILVUS_ADDRESS \

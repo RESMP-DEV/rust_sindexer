@@ -31,14 +31,13 @@ EXPECTED_DIM=1536
 LOG="$HOME/Library/Logs/sindexer-doctor.log"
 
 # The indexed fleet (2026-09-24 bring-up). Extend here when new repos are added.
-REPOS="
-/Users/kearm/dclient /Users/kearm/AV_Harvest /Users/kearm/codex-firefox-host
-/Users/kearm/mimo-rl-observer /Users/kearm/modelctl-rs /Users/kearm/modelctl
-/Users/kearm/azure-workflows /Users/kearm/resmp-reprocessor
-/Users/kearm/ventoy-stick /Users/kearm/kimi /Users/kearm/lapis
-/Users/kearm/ccr-rust
-/Users/kearm/AlphaHENG/contrib/rust_sindexer /Users/kearm/AlphaHENG
-/Users/kearm/ZCode /Users/kearm/codex
+REPOS="$HOME/dclient $HOME/AV_Harvest $HOME/codex-firefox-host
+$HOME/mimo-rl-observer $HOME/modelctl-rs $HOME/modelctl
+$HOME/azure-workflows $HOME/resmp-reprocessor
+$HOME/ventoy-stick $HOME/kimi $HOME/lapis
+$HOME/ccr-rust
+$HOME/AlphaHENG/contrib/rust_sindexer $HOME/AlphaHENG
+$HOME/ZCode $HOME/codex
 "
 FRESH_WARN_DAYS=7
 
@@ -49,17 +48,18 @@ bad()  { [ "$STATUS" -lt 2 ] && STATUS=2 || true; }
 warn() { [ "$STATUS" -lt 1 ] && STATUS=1 || true; return 0; }
 
 probe_dim() { # $1=url  -> "dim ms" or "error"
-  local r t
-  t=$(curl -s -o /tmp/.sdx-dr.$$ -w '%{time_total}' --max-time 10 \
+  local r t tmp
+  tmp=$(mktemp /tmp/sdx-dr.XXXXXX) || { echo "error"; return; }
+  t=$(curl -s -o "$tmp" -w '%{time_total}' --max-time 10 \
       -H 'Content-Type: application/json' -d '{"input":["sindexer doctor probe"]}' \
-      "$1/embeddings" 2>/dev/null) || { echo "error"; return; }
-  r=$(jq -r '.data[0].embedding | length' /tmp/.sdx-dr.$$ 2>/dev/null)
+      "$1/embeddings" 2>/dev/null) || { rm -f "$tmp"; echo "error"; return; }
+  r=$(jq -r '.data[0].embedding | length' "$tmp" 2>/dev/null)
   if [ -n "$r" ] && [ "$r" != "null" ]; then
     echo "$r $(awk -v s="$t" 'BEGIN{printf "%.0f", s*1000}')"
   else
     echo "error"
   fi
-  rm -f /tmp/.sdx-dr.$$
+  rm -f "$tmp"
 }
 
 # --- wrapper ---------------------------------------------------------------
@@ -156,7 +156,7 @@ case "${1:-}" in
     json
     ;;
   --watch)
-    json >> "$LOG" 2>/dev/null
+    json >> "$LOG"
     tail -n 2000 "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
     ;;
   *)
