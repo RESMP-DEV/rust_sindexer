@@ -1,0 +1,28 @@
+#!/bin/bash
+# Uniform entry for the Rust indexing CLI (sindexer / rust-indexer).
+#
+# Sources the shared profile from ~/.context/.env so every caller — shell
+# agents, humans, cron — gets the same embedding endpoint and vector backend
+# the AlphaHENG CCR flows use. Caller-provided environment still wins: any
+# profile variable already exported is snapshot-restored after sourcing.
+# The binary itself reads only process env; it does not parse the .env file.
+env_file="$HOME/.context/.env"
+bin=/usr/local/bin/sindexer
+if [ -r "$env_file" ]; then
+  saved=$(mktemp)
+  trap 'rm -f "$saved"' EXIT
+  for k in EMBEDDING_URL OPENAI_BASE_URL EMBEDDING_MODEL EMBEDDING_API_KEY \
+           OPENAI_API_KEY EMBEDDING_QUERY_PREFIX EMBEDDING_PASSAGE_PREFIX \
+           EMBEDDING_DIMENSION EMBEDDING_BATCH_SIZE MILVUS_URL MILVUS_ADDRESS \
+           MILVUS_TOKEN SINDEXER_COLLECTION_IDENTITY SINDEXER_COLLECTION_ROOT; do
+    if [ -n "${!k+x}" ]; then
+      printf '%s=%q\n' "$k" "${!k}" >> "$saved"
+    fi
+  done
+  set -a
+  . "$env_file"
+  set +a
+  . "$saved"
+  rm -f "$saved"
+fi
+exec "$bin" "$@"

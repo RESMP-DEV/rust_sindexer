@@ -6,6 +6,14 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ### Added
 
+- Local operations kit (`deploy/local`): the `~/.local/bin/sindexer` PATH
+  wrapper (sources `~/.context/.env`, caller env wins) and the
+  `sindexer-doctor` health monitor (human / `--json` / `--watch`, exit
+  0/1/2), plus the 30-minute watchdog LaunchAgent plist. Includes the
+  launchd-PATH hardening (Homebrew/OrbStack resolution inside the doctor)
+  that ended the false "degraded" ticks logged since the watchdog's
+  creation. Live host files become symlinks to this directory so the repo
+  is the single source of truth.
 - B550 deployment kit (`deploy/b550`): direct CUDA MXFP4 Jina embeddings,
   remote Milvus persistence, automatic selection of the 3090 Ti with the
   most free VRAM, and a loopback-only SSH tunnel from the Mac. Review

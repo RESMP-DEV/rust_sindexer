@@ -1,0 +1,175 @@
+#!/bin/bash
+# sindexer-doctor — health monitor for the local Rust-indexer stack.
+#
+# Checks the full semantic-search path: wrapper -> embedding server (1235,
+# Jina MLX via LaunchAgent) -> Milvus (19530, ~/milvus docker-compose), plus
+# index freshness for the indexed project fleet. LM Studio (1234, nomic) and
+# B550 reachability are informational fallback/context checks.
+#
+# Usage:
+#   sindexer-doctor            human-readable report
+#   sindexer-doctor --json     single JSON object on stdout
+#   sindexer-doctor --watch    append one JSON line to the watchdog log
+
+# LaunchAgent/cron contexts start with PATH=/usr/bin:/bin, where brew's
+# coreutils `timeout` and OrbStack's `docker` do not exist; without this
+# the collections check silently fails and every tick logs a false
+# "degraded". Keep the /bin/bash pin: system bash always resolves.
+PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.orbstack/bin:$PATH"
+
+#                              (used by LaunchAgent com.local.sindexer-doctor)
+#
+# Exit codes: 0 healthy, 1 degraded (usable but attention warranted),
+# 2 broken (semantic search dead; lexical/other fallbacks may remain).
+# Bash 3.2 compatible (no associative arrays).
+set -u
+
+JINA_AGENT="dev.resmp.jina-code-mlx"
+JINA_URL="http://127.0.0.1:1235/v1"
+LMS_URL="http://127.0.0.1:1234/v1"
+EXPECTED_DIM=1536
+LOG="$HOME/Library/Logs/sindexer-doctor.log"
+
+# The indexed fleet (2026-09-24 bring-up). Extend here when new repos are added.
+REPOS="$HOME/dclient $HOME/AV_Harvest $HOME/codex-firefox-host
+$HOME/mimo-rl-observer $HOME/modelctl-rs $HOME/modelctl
+$HOME/azure-workflows $HOME/resmp-reprocessor
+$HOME/ventoy-stick $HOME/kimi $HOME/lapis
+$HOME/ccr-rust
+$HOME/AlphaHENG/contrib/rust_sindexer $HOME/AlphaHENG
+$HOME/ZCode $HOME/codex
+"
+FRESH_WARN_DAYS=7
+
+now=$(date +%s)
+STATUS=0
+
+bad()  { [ "$STATUS" -lt 2 ] && STATUS=2 || true; }
+warn() { [ "$STATUS" -lt 1 ] && STATUS=1 || true; return 0; }
+
+probe_dim() { # $1=url  -> "dim ms" or "error"
+  local r t tmp
+  tmp=$(mktemp /tmp/sdx-dr.XXXXXX) || { echo "error"; return; }
+  t=$(curl -s -o "$tmp" -w '%{time_total}' --max-time 10 \
+      -H 'Content-Type: application/json' -d '{"input":["sindexer doctor probe"]}' \
+      "$1/embeddings" 2>/dev/null) || { rm -f "$tmp"; echo "error"; return; }
+  r=$(jq -r '.data[0].embedding | length' "$tmp" 2>/dev/null)
+  if [ -n "$r" ] && [ "$r" != "null" ]; then
+    echo "$r $(awk -v s="$t" 'BEGIN{printf "%.0f", s*1000}')"
+  else
+    echo "error"
+  fi
+  rm -f "$tmp"
+}
+
+# --- wrapper ---------------------------------------------------------------
+if [ -x "$HOME/.local/bin/sindexer" ]; then
+  j_wrapper='"ok":true'
+else
+  j_wrapper='"ok":false,"detail":"~/.local/bin/sindexer missing or not executable"'
+  bad
+fi
+
+# --- embedding server (1235) ----------------------------------------------
+agent_state=$(launchctl list 2>/dev/null | awk -v a="$JINA_AGENT" '$3==a {print $1}')
+if [ "$agent_state" != "" ] && [ "$agent_state" != "-" ]; then
+  if [[ "$agent_state" =~ ^[0-9]+$ ]]; then
+    j_agent='"running":true,"pid":'"$agent_state"
+  else
+    j_agent='"running":false,"last_exit":'"$agent_state"
+    warn
+  fi
+else
+  j_agent='"running":false'
+  warn
+fi
+dim_ms=$(probe_dim "$JINA_URL")
+dim=${dim_ms%% *}; ms=${dim_ms##* }
+if [ "$dim" = "error" ]; then
+  j_embed='"ok":false,"detail":"no response on 1235"'
+  bad
+elif [ "$dim" != "$EXPECTED_DIM" ]; then
+  j_embed="\"ok\":false,\"dimension\":$dim,\"detail\":\"expected $EXPECTED_DIM\""
+  bad
+else
+  j_embed="\"ok\":true,\"dimension\":$dim,\"latency_ms\":$ms"
+fi
+
+# --- milvus (19530) ---------------------------------------------------------
+if nc -z -w 2 127.0.0.1 19530 2>/dev/null; then
+  cols=$(timeout 15 "$HOME/.local/bin/sindexer" collections 2>/dev/null \
+    | jq -c '{n: (.collections|length), rows: ([.collections[].row_count] | add // 0)}' 2>/dev/null)
+  cols=${cols#\{}; cols=${cols%\}}
+  if [ -n "$cols" ]; then
+    j_milvus='"ok":true,'"${cols%,}"
+  else
+    j_milvus='"ok":true,"port":true,"detail":"collections query failed"'
+    warn
+  fi
+  dstate=$(docker inspect --format '{{.State.Health.Status}}' milvus-standalone 2>/dev/null)
+  j_container="\"state\":\"${dstate:-unknown}\""
+  if [ "$dstate" != "healthy" ]; then warn; fi
+else
+  j_milvus='"ok":false,"detail":"port 19530 closed"'
+  j_container='"state":"down"'
+  bad
+fi
+
+# --- index freshness --------------------------------------------------------
+fresh_json=""; stale=0; missing=0
+for r in $REPOS; do
+  m="$r/.sindexer/index-manifest.json"
+  if [ -f "$m" ]; then
+    age=$(( (now - $(stat -f %m "$m")) / 86400 ))
+    if [ "$age" -ge "$FRESH_WARN_DAYS" ]; then warn; stale=$((stale+1)); fi
+    fresh_json="$fresh_json{\"repo\":\"${r##*/}\",\"age_days\":$age},"
+  else
+    missing=$((missing+1))
+    fresh_json="$fresh_json{\"repo\":\"${r##*/}\",\"age_days\":null},"
+  fi
+done
+fresh_json=${fresh_json%,}
+j_fresh="\"warn_days\":$FRESH_WARN_DAYS,\"stale\":$stale,\"missing_manifest\":$missing,\"repos\":[$fresh_json]"
+
+# --- informational: LM Studio fallback + B550 -------------------------------
+lms_dim=$(probe_dim "$LMS_URL" | cut -d' ' -f1)
+if [[ "$lms_dim" =~ ^[0-9]+$ ]]; then lms_ok=true; else lms_ok=false; lms_dim=null; fi
+j_lms="\"dimension\":$lms_dim,\"ok\":$lms_ok"
+if nc -z -w 2 192.168.1.171 22 2>/dev/null; then j_b550='"reachable":true'; else j_b550='"reachable":false'; fi
+j_disk=$(du -sm "$HOME/milvus/volumes" 2>/dev/null | awk '{print $1}')
+[ -n "$j_disk" ] || j_disk=0
+
+# --- emit -------------------------------------------------------------------
+case "$STATUS" in
+  0) status_word="healthy" ;;
+  1) status_word="degraded" ;;
+  *) status_word="broken" ;;
+esac
+
+json() {
+  printf '{"ts":%s,"status":"%s","wrapper":{%s},"jina_agent":{%s},"jina_endpoint":{%s},"milvus":{%s},"milvus_container":{%s},"freshness":{%s},"lmstudio_fallback":{%s},"b550":{%s},"milvus_disk_mb":%s}\n' \
+    "$now" "$status_word" "$j_wrapper" "$j_agent" "$j_embed" "$j_milvus" "$j_container" "$j_fresh" "$j_lms" "$j_b550" "$j_disk"
+}
+
+case "${1:-}" in
+  --json)
+    json
+    ;;
+  --watch)
+    json >> "$LOG"
+    tail -n 2000 "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
+    ;;
+  *)
+    json | jq -r '
+      "status:        \(.status)",
+      "wrapper:       \(.wrapper.ok // false)",
+      "jina agent:    \(.jina_agent.running) pid=\(.jina_agent.pid // "-")",
+      "jina 1235:     \(.jina_endpoint.ok // false) dim=\(.jina_endpoint.dimension // "-") latency=\(.jina_endpoint.latency_ms // "-")ms",
+      "milvus:        \(.milvus.ok // false) collections=\(.milvus.n // "-") rows=\(.milvus.rows // "-") container=\(.milvus_container.state // "-")",
+      "freshness:     stale=\(.freshness.stale) missing=\(.freshness.missing_manifest) (warn \( .freshness.warn_days)d) oldest=\([.freshness.repos[] | select(.age_days != null) | .age_days] | max // 0)d",
+      "lmstudio 1234: dim=\(.lmstudio_fallback.dimension) (fallback)",
+      "b550:          reachable=\(.b550.reachable) (tunnel dormant)",
+      "milvus disk:   \(.milvus_disk_mb)MB"'
+    ;;
+esac
+exit $STATUS
