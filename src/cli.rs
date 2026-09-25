@@ -782,6 +782,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The env guard must stay held for the whole `run` call, which reads
+    // SINDEXER_USAGE_LOG while awaiting; a scoped lock would drop protection.
+    #[allow(clippy::await_holding_lock)]
     async fn usage_verb_reports_from_configured_log() {
         let lock = crate::usage::test_support::ENV_LOCK
             .lock()

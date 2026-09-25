@@ -892,8 +892,8 @@ mod tests {
         fs::write(root.join("a.rs"), "x".repeat(100)).unwrap();
         fs::write(root.join("b.rs"), "y".repeat(40)).unwrap();
 
-        let a = PathBuf::from(root.join("a.rs"));
-        let b = PathBuf::from(root.join("b.rs"));
+        let a = root.join("a.rs");
+        let b = root.join("b.rs");
         let hits = vec![
             chunk("src/a.rs", "aaaa", Some(a.clone())),
             chunk("src/a.rs", "bbbb", Some(a.clone())),
