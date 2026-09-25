@@ -24,6 +24,16 @@ embedding service to 48 GiB so a failed warm-up cannot exhaust the host.
 - Vector stack and data: `milvus/`
 - Mac tunnel: `~/Library/LaunchAgents/dev.resmp.rust-indexer-b550-tunnel.plist`
 
+## Credentials
+
+MinIO is reachable only over the compose network; no host ports are
+published for it. Its credentials live in an untracked env file, not in the
+compose file: copy `deploy/b550/.env.example` to `deploy/b550/.env`, set
+real values for `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD`, and keep the
+file at mode `0600`. `docker compose` loads `.env` from the directory
+holding the compose file, so the deployed `milvus/` copy on B550 needs the
+same file.
+
 ## Acceptance
 
 The move is complete only when:
