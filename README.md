@@ -176,10 +176,16 @@ sindexer collections                          # what is indexed, row counts
 sindexer stats <collection> | drop <collection>
 ```
 
-Output is compact JSON on stdout (logs go to stderr). When `EMBEDDING_URL` is
-unset and an OpenAI-compatible embedding server answers on 127.0.0.1:1234, it
-is used automatically, so semantic mode works out of the box alongside a local
-LM Studio instance.
+Output is compact JSON on stdout (logs go to stderr). For `index`, `update`,
+and `search`, when neither `EMBEDDING_URL` nor `OPENAI_BASE_URL` is set and an
+OpenAI-compatible embedding server returns a valid `/v1/embeddings` response
+on 127.0.0.1:1234, the CLI uses it and sets `EMBEDDING_DIMENSION` to the
+measured vector length. Set `SINDEXER_AUTO_EMBEDDING=0` to disable this and
+stay lexical-only. Auto-discovery trusts whatever answers on that port; for
+sensitive indexing, set an explicit `EMBEDDING_URL`. Paths shared between CLI
+and MCP modes need consistent explicit embedding configuration — an
+embedding-dimension change deliberately invalidates the index manifest and
+triggers a full rebuild.
 
 
 ### MCP tools

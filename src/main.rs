@@ -28,8 +28,10 @@ fn main() -> Result<()> {
                 .with(fmt::layer().with_writer(std::io::stderr))
                 .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")))
                 .init();
-            let runtime = tokio::runtime::Runtime::new()?;
-            let code = runtime.block_on(cli::run(&args))?;
+            let code = {
+                let runtime = tokio::runtime::Runtime::new()?;
+                runtime.block_on(cli::run(&args))?
+            };
             std::process::exit(code);
         }
         Some(other) => {

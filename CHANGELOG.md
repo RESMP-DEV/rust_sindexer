@@ -32,6 +32,12 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ### Fixed
 
+- The local-embedding probe uses a 1-second connect timeout and parses the
+  first JSON value from the response, so chunked transfer encoding no longer
+  silently disables the auto-default embedding endpoint.
+- The CLI-mode tokio runtime is dropped before `std::process::exit`, so
+  destructors run on exit instead of being skipped by the direct exit call.
+
 - `update_index` now self-heals a missing or incompatible per-codebase manifest
   or vector collection by rebuilding only that scoped index. Unrelated
   collections are never used as a fallback or removed.

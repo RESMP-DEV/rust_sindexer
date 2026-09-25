@@ -29,6 +29,8 @@ use crate::walker::CodeWalker;
 
 /// Live-rows reconciliation helpers shared by the MCP wrappers and the CLI
 /// verbs, so the two paths cannot drift (see tools.rs / cli.rs call sites).
+/// Whether `status` alone justifies querying live row counts: idle, or a
+/// completed status whose counters never left zero.
 pub fn should_request_live_rows(status: &IndexStatus) -> bool {
     match status.status {
         IndexState::Idle => true,
@@ -41,6 +43,9 @@ pub fn should_request_live_rows(status: &IndexStatus) -> bool {
     }
 }
 
+/// Whether freshly fetched live rows may be folded into `status`: only idle
+/// or completed states qualify, and a completed status accepts them when the
+/// request originated from idle or its counters never left zero.
 pub fn can_apply_live_rows(status: &IndexStatus, requested_from_idle: bool) -> bool {
     match status.status {
         IndexState::Idle => true,
@@ -54,6 +59,7 @@ pub fn can_apply_live_rows(status: &IndexStatus, requested_from_idle: bool) -> b
     }
 }
 
+/// Convert a u64 live row count to usize, saturating at `usize::MAX`.
 pub fn checked_live_row_count(row_count: u64) -> usize {
     match usize::try_from(row_count) {
         Ok(count) => count,

@@ -40,6 +40,8 @@ pub const VERBS: &[&str] = &[
 
 const EMBEDDING_VERBS: &[&str] = &["index", "update", "search"];
 
+/// True when `arg` names one of the CLI verbs (main uses this to pick CLI
+/// mode over MCP server mode).
 pub fn is_verb(arg: &str) -> bool {
     VERBS.contains(&arg)
 }
@@ -85,6 +87,7 @@ OPTIONS:
 See README.md for the full configuration and usage reference.
 "#;
 
+/// Print a usage mistake to stderr and return the usage exit code (2).
 fn usage_error(message: &str) -> Result<i32> {
     eprintln!("sindexer: {message}\nRun 'sindexer --help' for usage.");
     Ok(2)
@@ -134,8 +137,9 @@ pub fn prepare_environment(verb: &str) {
 /// schema. Best-effort: any failure means lexical-only mode (no env set).
 fn probe_local_embeddings() -> Option<usize> {
     use std::io::{Read, Write};
-    use std::net::TcpStream;
-    let mut stream = TcpStream::connect("127.0.0.1:1234").ok()?;
+    use std::net::{SocketAddr, TcpStream};
+    let addr: SocketAddr = "127.0.0.1:1234".parse().ok()?;
+    let mut stream = TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(1)).ok()?;
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(2)));
     let body = r#"{"input":["sindexer dimension probe"]}"#;
@@ -147,9 +151,14 @@ fn probe_local_embeddings() -> Option<usize> {
     let mut response = String::new();
     stream.read_to_string(&mut response).ok()?;
     let payload = response.split_once("\r\n\r\n")?.1;
-    // Tolerate chunked encoding crudely: find the JSON object start.
+    // Skip the HTTP preamble by finding the JSON object start, then parse
+    // exactly one JSON value so trailing chunked-transfer metadata
+    // (`\r\n0\r\n\r\n`) is ignored.
     let json_start = payload.find('{')?;
-    let value: serde_json::Value = serde_json::from_str(&payload[json_start..]).ok()?;
+    let value: serde_json::Value = serde_json::Deserializer::from_str(&payload[json_start..])
+        .into_iter::<serde_json::Value>()
+        .next()?
+        .ok()?;
     let dimension = value
         .pointer("/data/0/embedding")
         .and_then(|array| array.as_array())
@@ -160,10 +169,12 @@ fn probe_local_embeddings() -> Option<usize> {
     Some(dimension)
 }
 
+/// Per-invocation shared state built from the environment configuration.
 fn shared_state() -> SharedState {
     create_shared_state(Config::from_env())
 }
 
+/// `index` verb: build or rebuild the index, print the JSON summary.
 async fn cmd_index(path: &Path, force: bool) -> Result<i32> {
     let state = shared_state();
     let indexer_state = indexer::create_indexer_state(&state, path);
@@ -183,6 +194,7 @@ async fn cmd_index(path: &Path, force: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// `update` verb: incremental refresh, print the JSON summary.
 async fn cmd_update(path: &Path) -> Result<i32> {
     let state = shared_state();
     let indexer_state = indexer::create_indexer_state(&state, path);
@@ -202,6 +214,7 @@ async fn cmd_update(path: &Path) -> Result<i32> {
     Ok(0)
 }
 
+/// `search` verb: hybrid semantic+lexical search, print fused hits as JSON.
 async fn cmd_search(
     path: &Path,
     query: &str,
@@ -267,6 +280,7 @@ async fn cmd_search(
     Ok(0)
 }
 
+/// `status` verb: index status with live-rows reconciliation, as JSON.
 async fn cmd_status(path: &Path) -> Result<i32> {
     let state = shared_state();
     let mut status = state.get_status(path);
@@ -295,6 +309,8 @@ async fn cmd_status(path: &Path) -> Result<i32> {
     Ok(0)
 }
 
+/// `clear` verb: drop the vector collection and lexical index for a path and
+/// reset its status.
 async fn cmd_clear(path: &Path) -> Result<i32> {
     let state = shared_state();
     let collection_name = collection_name_from_path(path);
@@ -329,6 +345,7 @@ async fn cmd_clear(path: &Path) -> Result<i32> {
     Ok(0)
 }
 
+/// `collections` verb: list vector collections with row counts.
 async fn cmd_collections() -> Result<i32> {
     let state = shared_state();
     let names = state.vector_store.list_collections().await?;
@@ -349,6 +366,7 @@ async fn cmd_collections() -> Result<i32> {
     Ok(0)
 }
 
+/// `stats` verb: row count for one collection.
 async fn cmd_stats(collection: &str) -> Result<i32> {
     let state = shared_state();
     let stats = state.vector_store.collection_stats(collection).await?;
@@ -359,6 +377,7 @@ async fn cmd_stats(collection: &str) -> Result<i32> {
     Ok(0)
 }
 
+/// `drop` verb: permanently drop one collection; exit 1 when it is missing.
 async fn cmd_drop(collection: &str) -> Result<i32> {
     let state = shared_state();
     let exists = state.vector_store.has_collection(collection).await?;
@@ -520,10 +539,12 @@ pub async fn run(args: &[String]) -> Result<i32> {
 mod tests {
     use super::run;
 
+    /// Build a `Vec<String>` argument vector for `run`.
     fn args(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| part.to_string()).collect()
     }
 
+    /// Unknown flags are usage errors (exit 2).
     #[tokio::test]
     async fn unknown_flag_is_a_usage_error() {
         assert_eq!(run(&args(&["index", "--bogus"])).await.unwrap(), 2);
@@ -533,6 +554,7 @@ mod tests {
         );
     }
 
+    /// Extra positionals are usage errors (exit 2).
     #[tokio::test]
     async fn extra_positionals_are_usage_errors() {
         assert_eq!(run(&args(&["index", "a", "b"])).await.unwrap(), 2);
@@ -541,6 +563,7 @@ mod tests {
         assert_eq!(run(&args(&["search", "a", "b", "c"])).await.unwrap(), 2);
     }
 
+    /// Missing required arguments are usage errors (exit 2).
     #[tokio::test]
     async fn missing_arguments_are_usage_errors() {
         assert_eq!(run(&args(&["index"])).await.unwrap(), 2);
@@ -548,11 +571,13 @@ mod tests {
         assert_eq!(run(&args(&["drop"])).await.unwrap(), 2);
     }
 
+    /// `update` rejects a `--force` flag (exit 2).
     #[tokio::test]
     async fn update_rejects_force_flag() {
         assert_eq!(run(&args(&["update", "--force"])).await.unwrap(), 2);
     }
 
+    /// A query starting with `-` after `--` is kept as the query, not a flag.
     #[tokio::test]
     async fn query_starting_with_dash_after_separator_is_kept() {
         // Path does not exist, so this is a runtime error (exit via Err),
