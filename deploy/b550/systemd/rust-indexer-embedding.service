@@ -1,0 +1,25 @@
+[Unit]
+Description=Rust Indexer Jina CUDA MXFP4 embedding service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kearm
+Group=kearm
+WorkingDirectory=/home/kearm/services/rust-indexer
+Environment=RUST_INDEXER_SERVICE_ROOT=/home/kearm/services/rust-indexer
+Environment=HF_HOME=/home/kearm/.cache/huggingface
+Environment=TORCHINDUCTOR_CACHE_DIR=/home/kearm/.cache/torchinductor/rust-indexer
+Environment=TRITON_CACHE_DIR=/home/kearm/.cache/triton/rust-indexer
+ExecStart=/home/kearm/services/rust-indexer/runtime/start_embedding.sh
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=900
+TimeoutStopSec=30
+MemoryHigh=32G
+MemoryMax=48G
+OOMPolicy=stop
+
+[Install]
+WantedBy=multi-user.target

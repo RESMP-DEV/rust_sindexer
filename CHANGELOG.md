@@ -6,6 +6,11 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ### Added
 
+- B550 deployment kit (`deploy/b550`): direct CUDA MXFP4 Jina embeddings,
+  remote Milvus persistence, automatic selection of the 3090 Ti with the
+  most free VRAM, and a loopback-only SSH tunnel from the Mac. Ported from
+  the retired rust-indexer repository (PR rust-indexer#3).
+
 - Native CLI mode: `sindexer <verb> [args]` with `index`, `update`, `search`,
   `status`, `clear`, `collections`, `stats`, and `drop`. Verbs share the exact
   indexing/search cores with the MCP tool layer (`create_indexer_state` and

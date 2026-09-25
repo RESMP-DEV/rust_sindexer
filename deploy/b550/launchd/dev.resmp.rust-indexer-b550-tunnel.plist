@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.resmp.rust-indexer-b550-tunnel</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/ssh</string>
+    <string>-4</string>
+    <string>-NT</string>
+    <string>-o</string>
+    <string>BatchMode=yes</string>
+    <string>-o</string>
+    <string>ExitOnForwardFailure=yes</string>
+    <string>-o</string>
+    <string>ServerAliveInterval=15</string>
+    <string>-o</string>
+    <string>ServerAliveCountMax=3</string>
+    <string>-L</string>
+    <string>127.0.0.1:1235:127.0.0.1:1235</string>
+    <string>-L</string>
+    <string>127.0.0.1:19530:127.0.0.1:19530</string>
+    <string>-L</string>
+    <string>127.0.0.1:19091:127.0.0.1:19091</string>
+    <string>b550</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/kearm/Library/Logs/rust-indexer-b550-tunnel.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/kearm/Library/Logs/rust-indexer-b550-tunnel.err</string>
+</dict>
+</plist>
