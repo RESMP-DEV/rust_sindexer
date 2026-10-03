@@ -6,6 +6,19 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ### Added
 
+- Repo overview verb: `sindexer overview <path> [--depth N] [--tokens N]
+  [--human]` — directory skeleton with per-dir file counts and dominant
+  extensions from a live gitignore-aware walk over all file types and empty
+  directories (the indexing walker's ignore and configured symlink semantics,
+  extracted into a shared `walk_builder`; no vector backend or existing index
+  needed, so it doubles as a pre-index orientation pass). Tokens are the final
+  rendered output measured as bytes/4 (default 1200, 0 = unlimited); over
+  budget the rendering drops a depth level, then keeps the largest depth-1
+  directories by subtree size, ties alphabetical. Omitted directories,
+  truncated languages, walk errors, and an impossible over-budget floor are
+  reported explicitly. Compact JSON by default, `--human` for an indented
+  skeleton without box-drawing art. Ordering is fully deterministic by path
+  components.
 - Local operations kit (`deploy/local`): the `~/.local/bin/sindexer` PATH
   wrapper (sources `~/.context/.env`, caller env wins) and the
   `sindexer-doctor` health monitor (human / `--json` / `--watch`, exit

@@ -170,6 +170,8 @@ MCP stdio server.
 sindexer index /abs/or/relative/project        # index (full build if needed)
 sindexer update project                       # incremental update
 sindexer search project "query" --limit 5      # hybrid semantic+lexical
+sindexer overview project [--depth N] [--tokens N] [--human]
+                                              # repo structure at a glance
 sindexer status project                       # indexing status
 sindexer clear project                       # remove the index
 sindexer collections                          # what is indexed, row counts
@@ -187,6 +189,27 @@ sensitive indexing, set an explicit `EMBEDDING_URL`. Paths shared between CLI
 and MCP modes need consistent explicit embedding configuration — an
 embedding-dimension change deliberately invalidates the index manifest and
 triggers a full rebuild.
+
+### Repo overview
+
+`sindexer overview <path> [--depth N] [--tokens N] [--human]` answers "what
+does this repo look like": the directory skeleton with per-dir file counts,
+dominant extensions, totals, and empty directories, from a live
+gitignore-aware walk over all file types. It shares the indexing walker's
+ignore and configured symlink rules but needs no vector backend and no
+existing index, so it also works as a pre-index orientation pass.
+
+`--depth` defaults to 2 and must be at least 1. `--tokens` defaults to 1200;
+`--tokens 0` disables pruning. Tokens are the final rendered output's bytes
+divided by four, rounded up. If rendering does not fit, overview first lowers
+the displayed depth, then keeps the largest depth-1 directories by subtree
+size (ties alphabetical). It reports omitted directories and language
+truncation in every mode. When even one directory cannot fit, `over_budget`
+is true and human output includes an over-budget marker; this is an explicit
+floor, not silent truncation. Walk-entry read failures appear as
+`walk_errors`, and human output marks the skeleton incomplete. Ordering is
+deterministic; `--human` prints an indented skeleton instead of the default
+compact JSON.
 
 ### Usage telemetry
 
