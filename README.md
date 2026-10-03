@@ -170,6 +170,8 @@ MCP stdio server.
 sindexer index /abs/or/relative/project        # index (full build if needed)
 sindexer update project                       # incremental update
 sindexer search project "query" --limit 5      # hybrid semantic+lexical
+sindexer overview project [--depth 2] [--tokens 1200] [--human]
+                                              # repo structure at a glance
 sindexer status project                       # indexing status
 sindexer clear project                       # remove the index
 sindexer collections                          # what is indexed, row counts
@@ -187,6 +189,19 @@ sensitive indexing, set an explicit `EMBEDDING_URL`. Paths shared between CLI
 and MCP modes need consistent explicit embedding configuration — an
 embedding-dimension change deliberately invalidates the index manifest and
 triggers a full rebuild.
+
+### Repo overview
+
+`sindexer overview <path> [--depth N] [--tokens N] [--human]` answers "what
+does this repo look like" in one bounded call: the directory skeleton with
+per-dir file counts, dominant extensions, and totals, from a live
+gitignore-aware walk over all file types. It shares the indexing walker's
+ignore rules but needs no vector backend and no existing index, so it also
+works as a pre-index orientation pass. Tokens are estimated as bytes/4 and
+budget the rendered output (default 1200, `--tokens 0` disables): over
+budget the rendering drops a depth level, then keeps the largest
+directories by subtree size (ties alphabetical). Ordering is deterministic;
+`--human` prints an indented skeleton instead of the default compact JSON.
 
 ### Usage telemetry
 

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::Result;
+use ignore::WalkBuilder;
 use tracing::{debug, info, instrument};
 
 use crate::config::{Config, DEFAULT_IGNORE_PATTERNS, EXTENSIONLESS_FILES, SUPPORTED_EXTENSIONS};
@@ -49,7 +50,6 @@ impl CodeWalker {
     /// This runs in parallel using the ignore crate's parallel walker.
     #[instrument(skip(self), fields(path = %path.display()))]
     pub async fn walk(&self, path: &Path) -> Result<Vec<PathBuf>> {
-        use ignore::WalkBuilder;
         use std::sync::Mutex;
 
         let start = Instant::now();
@@ -60,25 +60,7 @@ impl CodeWalker {
         );
         let files = std::sync::Arc::new(Mutex::new(Vec::new()));
         let extensions = self.extensions.clone();
-        let mut builder = WalkBuilder::new(path);
-
-        builder
-            .hidden(true)
-            .parents(false)
-            .follow_links(self.follow_symlinks)
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true);
-        builder.add_custom_ignore_filename(".contextignore");
-
-        if let Some(home) = std::env::var_os("HOME") {
-            let global_ignore = std::path::PathBuf::from(home)
-                .join(".context")
-                .join(".contextignore");
-            if global_ignore.exists() {
-                builder.add_ignore(global_ignore);
-            }
-        }
+        let builder = walk_builder(path, self.follow_symlinks);
 
         let walker = builder.build_parallel();
 
@@ -149,7 +131,30 @@ impl CodeWalker {
     }
 }
 
-fn should_skip_path(root: &Path, path: &Path, ignore_patterns: &[String]) -> bool {
+/// Shared ignore-aware traversal base: hidden entries skipped, repo/global/
+/// exclude gitignores honored, `.contextignore` overlays applied. Single
+/// source of truth so the indexing walker and the overview verb see the
+/// same fleet-wide ignore policy.
+pub fn walk_builder(root: &Path, follow_links: bool) -> WalkBuilder {
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .hidden(true)
+        .parents(false)
+        .follow_links(follow_links)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true);
+    builder.add_custom_ignore_filename(".contextignore");
+    if let Some(home) = std::env::var_os("HOME") {
+        let global_ignore = PathBuf::from(home).join(".context").join(".contextignore");
+        if global_ignore.exists() {
+            builder.add_ignore(global_ignore);
+        }
+    }
+    builder
+}
+
+pub(crate) fn should_skip_path(root: &Path, path: &Path, ignore_patterns: &[String]) -> bool {
     let relative = path.strip_prefix(root).unwrap_or(path);
     let components = relative
         .components()

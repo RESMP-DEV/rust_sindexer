@@ -25,6 +25,7 @@ use crate::lexical::LexicalIndex;
 use crate::mcp::hybrid::{fuse_hybrid_hits, HybridFusionOptions, HybridHit};
 use crate::mcp::indexer;
 use crate::mcp::state::{create_shared_state, SharedState};
+use crate::overview;
 use crate::types::IndexStatus;
 use crate::usage::{self, HitMetrics, IndexLog, SearchLog};
 use crate::vectordb::collection_name_from_path;
@@ -33,6 +34,7 @@ pub const VERBS: &[&str] = &[
     "index",
     "update",
     "search",
+    "overview",
     "status",
     "clear",
     "collections",
@@ -62,6 +64,16 @@ CLI VERBS:
     search <path> <query> [--limit N]   Hybrid semantic+lexical search;
                                         [--ext rs,py] filters extensions;
                                         `--` ends flag parsing.
+    overview <path> [--depth N] [--tokens N] [--human]
+                                        Repo structure at a glance: dir
+                                        skeleton with per-dir file counts
+                                        and dominant extensions, from a
+                                        live gitignore-aware walk (same
+                                        ignore rules as indexing, all file
+                                        types). Tokens (bytes/4) budget the
+                                        rendering: default 1200, 0 =
+                                        unlimited; over budget it drops a
+                                        depth level, then the smallest dirs.
     status <path>                       Indexing status for a codebase.
     clear <path>                        Remove a codebase's index (the path
                                         need not exist; use it to clean up
@@ -398,6 +410,21 @@ async fn perform_search(
     ))
 }
 
+/// `overview` verb: repo structure at a glance, JSON by default.
+async fn cmd_overview(path: &Path, depth: usize, token_budget: usize, human: bool) -> Result<i32> {
+    let walk_path = path.to_path_buf();
+    let result =
+        task::spawn_blocking(move || overview::overview(&walk_path, depth, token_budget, human))
+            .await
+            .map_err(|err| anyhow!("failed to join overview task: {err}"))??;
+    if human {
+        println!("{}", overview::render_human(&result));
+    } else {
+        println!("{}", overview::render_json(&result));
+    }
+    Ok(0)
+}
+
 /// `status` verb: index status with live-rows reconciliation, as JSON.
 async fn cmd_status(path: &Path) -> Result<i32> {
     let state = shared_state();
@@ -685,6 +712,48 @@ pub async fn run(args: &[String]) -> Result<i32> {
             };
             cmd_search(&resolved, &query, limit, extensions).await
         }
+        "overview" => {
+            let mut path: Option<String> = None;
+            let mut depth = 2usize;
+            let mut token_budget = overview::DEFAULT_TOKEN_BUDGET;
+            let mut human = false;
+            let mut iter = rest.iter();
+            while let Some(arg) = iter.next() {
+                match arg.as_str() {
+                    "--depth" | "--tokens" => {
+                        let flag = arg.as_str();
+                        let Some(value) = iter.next() else {
+                            return usage_error(&format!("{flag} needs a value"));
+                        };
+                        let parsed: usize = match value.parse() {
+                            Ok(parsed) => parsed,
+                            Err(_) => {
+                                return usage_error(&format!("invalid {flag} value '{value}'"));
+                            }
+                        };
+                        if flag == "--depth" {
+                            if parsed == 0 {
+                                return usage_error("--depth must be >= 1");
+                            }
+                            depth = parsed;
+                        } else {
+                            token_budget = parsed;
+                        }
+                    }
+                    "--human" => human = true,
+                    other if other.starts_with("--") => {
+                        return usage_error(&format!("unknown flag '{other}' for overview"));
+                    }
+                    other if path.is_none() => path = Some(other.to_string()),
+                    _ => return usage_error("overview takes exactly one <path>"),
+                }
+            }
+            let Some(path) = path else {
+                return usage_error("overview takes <path>");
+            };
+            let resolved = directory_path(&path)?;
+            cmd_overview(&resolved, depth, token_budget, human).await
+        }
         "status" | "clear" => {
             if rest.len() != 1 {
                 return usage_error(&format!("{verb} takes exactly one <path>"));
@@ -764,6 +833,37 @@ mod tests {
     #[tokio::test]
     async fn update_rejects_force_flag() {
         assert_eq!(run(&args(&["update", "--force"])).await.unwrap(), 2);
+    }
+
+    /// `overview` flag misuse is a usage error (exit 2); a nonexistent path
+    /// with valid flags is a runtime error (Err, exit 1).
+    #[tokio::test]
+    async fn overview_verb_validates_flags() {
+        assert_eq!(run(&args(&["overview"])).await.unwrap(), 2);
+        assert_eq!(run(&args(&["overview", "--depth"])).await.unwrap(), 2);
+        assert_eq!(run(&args(&["overview", "--tokens"])).await.unwrap(), 2);
+        assert_eq!(
+            run(&args(&["overview", "/definitely/not/here", "--depth", "0"]))
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            run(&args(&["overview", "/definitely/not/here", "--depth", "x"]))
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            run(&args(&["overview", "/definitely/not/here", "--bogus"]))
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(run(&args(&["overview", "a", "b"])).await.unwrap(), 2);
+        assert!(run(&args(&["overview", "/definitely/not/here"]))
+            .await
+            .is_err());
     }
 
     /// A query starting with `-` after `--` is kept as the query, not a flag.
