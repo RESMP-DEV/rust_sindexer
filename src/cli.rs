@@ -69,11 +69,15 @@ CLI VERBS:
                                         skeleton with per-dir file counts
                                         and dominant extensions, from a
                                         live gitignore-aware walk (same
-                                        ignore rules as indexing, all file
-                                        types). Tokens (bytes/4) budget the
-                                        rendering: default 1200, 0 =
-                                        unlimited; over budget it drops a
-                                        depth level, then the smallest dirs.
+                                        ignore/symlink rules as indexing,
+                                        all file types and empty dirs).
+                                        --depth N (default 2, >= 1);
+                                        --tokens N (default 1200, 0 =
+                                        unlimited) uses the final rendered
+                                        bytes/4; it drops depth, then the
+                                        smallest dirs and reports over_budget
+                                        if the floor still does not fit.
+                                        `--` ends flag parsing.
     status <path>                       Indexing status for a codebase.
     clear <path>                        Remove a codebase's index (the path
                                         need not exist; use it to clean up
@@ -413,10 +417,12 @@ async fn perform_search(
 /// `overview` verb: repo structure at a glance, JSON by default.
 async fn cmd_overview(path: &Path, depth: usize, token_budget: usize, human: bool) -> Result<i32> {
     let walk_path = path.to_path_buf();
-    let result =
-        task::spawn_blocking(move || overview::overview(&walk_path, depth, token_budget, human))
-            .await
-            .map_err(|err| anyhow!("failed to join overview task: {err}"))??;
+    let follow_links = Config::from_env().follow_symlinks;
+    let result = task::spawn_blocking(move || {
+        overview::overview(&walk_path, depth, token_budget, human, follow_links)
+    })
+    .await
+    .map_err(|err| anyhow!("failed to join overview task: {err}"))??;
     if human {
         println!("{}", overview::render_human(&result));
     } else {
@@ -717,12 +723,16 @@ pub async fn run(args: &[String]) -> Result<i32> {
             let mut depth = 2usize;
             let mut token_budget = overview::DEFAULT_TOKEN_BUDGET;
             let mut human = false;
-            let mut iter = rest.iter();
-            while let Some(arg) = iter.next() {
-                match arg.as_str() {
-                    "--depth" | "--tokens" => {
-                        let flag = arg.as_str();
-                        let Some(value) = iter.next() else {
+            let mut end_of_flags = false;
+            let mut index = 0;
+            while index < rest.len() {
+                let arg = rest[index].as_str();
+                match arg {
+                    "--" if !end_of_flags => end_of_flags = true,
+                    "--depth" | "--tokens" if !end_of_flags => {
+                        let flag = arg;
+                        index += 1;
+                        let Some(value) = rest.get(index) else {
                             return usage_error(&format!("{flag} needs a value"));
                         };
                         let parsed: usize = match value.parse() {
@@ -740,13 +750,14 @@ pub async fn run(args: &[String]) -> Result<i32> {
                             token_budget = parsed;
                         }
                     }
-                    "--human" => human = true,
-                    other if other.starts_with("--") => {
+                    "--human" if !end_of_flags => human = true,
+                    other if !end_of_flags && other.starts_with('-') && other.len() > 1 => {
                         return usage_error(&format!("unknown flag '{other}' for overview"));
                     }
                     other if path.is_none() => path = Some(other.to_string()),
                     _ => return usage_error("overview takes exactly one <path>"),
                 }
+                index += 1;
             }
             let Some(path) = path else {
                 return usage_error("overview takes <path>");
