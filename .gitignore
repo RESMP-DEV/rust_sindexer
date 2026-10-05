@@ -23,8 +23,8 @@ target
 # Local development / orchestration artifacts
 .DS_Store
 .sindexer/
-.worktrees/
-build/
+/.worktrees/
+/build/
 agent_workspace/
 logs/
 reports/

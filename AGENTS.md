@@ -11,8 +11,9 @@ configuration and are documented in README.md.
 
 Prerequisites: macOS (Apple Silicon primary), git, Rust stable, `~/.local/bin`
 on PATH, `/usr/local/bin` on PATH, admin rights once (the served-binary
-symlink lives in a root-owned directory). Steps are ordered; verify each
-before moving on.
+symlink lives in a root-owned directory), and a GitHub SSH key registered
+for the RESMP-DEV org (or use the HTTPS remote URL in step 1). Steps are
+ordered; verify each before moving on.
 
 1. **Clone to the canonical path.** Collections key on the absolute path
    string (symlinks are NOT resolved), so the checkout location is the index
@@ -51,10 +52,14 @@ before moving on.
    | `MILVUS_TOKEN` | cluster token | Bearer auth |
 
    Optional: `EMBEDDING_QUERY_PREFIX` / `EMBEDDING_PASSAGE_PREFIX` (task
-   prefixes), `EMBEDDING_BATCH_SIZE`, `SINDEXER_COLLECTION_ROOT`,
+   prefixes), `BATCH_SIZE` (texts per embedding request, default 32 — note
+   the name; the binary does not read `EMBEDDING_BATCH_SIZE` even though
+   the wrapper round-trips it), `SINDEXER_COLLECTION_ROOT`,
    `SINDEXER_COLLECTION_IDENTITY`. Other variables that live in the same
-   file (`ZILLIZ_CLOUD_*`, `SPLITTER_TYPE`, `EMBEDDING_PROVIDER`, …) belong
-   to other fleet tooling; this binary ignores them.
+   file (`ZILLIZ_CLOUD_*`, `SPLITTER_TYPE`, `EMBEDDING_PROVIDER`,
+   `EMBEDDING_BATCH_SIZE`, …) belong to other fleet tooling; this binary
+   ignores them. Full environment reference including `MAX_FILE_SIZE`,
+   `RUST_LOG`, and defaults: README.md.
 
 4. **Install the local ops kit** (PATH wrapper, health monitor, watchdog):
    follow `deploy/local/README.md` verbatim — symlink `sindexer`,
@@ -66,10 +71,14 @@ before moving on.
    `/usr/local/bin/sindexer`.
 
 5. **MCP clients (optional).** With no arguments the binary speaks
-   newline-delimited JSON-RPC on stdio:
+   newline-delimited JSON-RPC on stdio. Point clients at the **wrapper**
+   (`~/.local/bin/sindexer`), not the raw binary: the wrapper is the only
+   place `~/.context/.env` enters, so exec-ing `/usr/local/bin/sindexer`
+   directly silently runs lexical-only at the 384-dim local default. JSON
+   configs cannot expand `~`, so write the absolute path for your user:
 
    ```json
-   { "mcpServers": { "sindexer": { "command": "/usr/local/bin/sindexer" } } }
+   { "mcpServers": { "sindexer": { "command": "/Users/kearm/.local/bin/sindexer" } } }
    ```
 
 6. **Verify the full path, in order:**
@@ -153,7 +162,8 @@ Java, C++, C, Ruby, PHP, Swift, Scala, C#
 
 **Embedder** (`src/embedding/mod.rs`) — `Embedder` enum: `Http` for
 OpenAI-compatible APIs, or `Disabled` for lexical-only. Auto-detected from
-`EMBEDDING_URL` / `OPENAI_BASE_URL`. Batches 32 texts per request.
+`EMBEDDING_URL` / `OPENAI_BASE_URL`. Batches 32 texts per request
+(`BATCH_SIZE`).
 
 **Vector Store** (`src/vectordb/`) — `VectorStore` enum: `Local`
 (brute-force cosine, JSON disk persistence) or `Milvus`
@@ -212,6 +222,7 @@ intermittently; it passes in isolation. Re-run before investigating.
 ## Dependencies
 
 - **Core:** rmcp 1.5.0, tokio, rayon, ignore
+- **Concurrency:** dashmap, parking_lot
 - **Parsing:** tree-sitter + language grammars
 - **HTTP:** reqwest (rustls-tls)
 - **Lexical:** tantivy
