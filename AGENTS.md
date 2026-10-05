@@ -26,8 +26,13 @@ ordered; verify each before moving on.
 
    A different path works but orphans existing collections for this repo;
    after moving a checkout, `sindexer clear <old-abs-path>` cleans up (it
-   works on deleted paths). `SINDEXER_COLLECTION_ROOT` /
-   `SINDEXER_COLLECTION_IDENTITY` scope identity per checkout when needed.
+   works on deleted paths). That is the **default** rule; when **both**
+   `SINDEXER_COLLECTION_IDENTITY` and `SINDEXER_COLLECTION_ROOT` are set,
+   identity is instead root-relative: both paths are canonicalized and the
+   collection derives from the configured identity plus the checkout's
+   path relative to the root (`src/vectordb/mod.rs`,
+   `scoped_collection_identity`) — the multi-host shared-collection mode.
+   One variable without the other is ignored.
 
 2. **Build and serve the release binary** (LTO profile; this artifact is the
    served binary — rebuild it after pulling changes):
@@ -110,8 +115,10 @@ second tier.
 - Every search and index/update appends a best-effort telemetry event to
   `~/.context/usage/sindexer.jsonl`; `sindexer usage --human` reports
   estimated token savings.
-- Collection identity: absolute path string, symlinks not resolved — keep
-  CLI and MCP callers passing the same path form.
+- Collection identity: by default the absolute path string with symlinks
+  not resolved — keep CLI and MCP callers passing the same path form. With
+  both `SINDEXER_COLLECTION_ROOT` and `SINDEXER_COLLECTION_IDENTITY` set,
+  identity is root-relative instead (see step 1).
 
 ## Operating modes (reference)
 
@@ -120,10 +127,11 @@ second tier.
   project scale (<50K chunks).
 - **Full scale** — `EMBEDDING_URL` + `MILVUS_URL`: Zilliz/Milvus backend.
   The production configuration described above.
-- **Dev fallback** — `EMBEDDING_URL` unset and an OpenAI-compatible server
+- **Dev fallback** — neither `EMBEDDING_URL` nor `OPENAI_BASE_URL` has a
+  non-empty value, and an OpenAI-compatible server
   answers on 127.0.0.1:1234 (LM Studio): used automatically for
   index/update/search unless `SINDEXER_AUTO_EMBEDDING=0`. Never fires when
-  `EMBEDDING_URL` is explicitly set.
+  either variable has a non-empty value.
 
 ## Architecture
 
