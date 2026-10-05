@@ -28,8 +28,10 @@ ordered; verify each before moving on.
    after moving a checkout, `sindexer clear <old-abs-path>` cleans up (it
    works on deleted paths). That is the **default** rule; when **both**
    `SINDEXER_COLLECTION_IDENTITY` and `SINDEXER_COLLECTION_ROOT` are set,
-   identity is instead root-relative: both paths are canonicalized and the
-   collection derives from the configured identity plus the checkout's
+   identity is root-relative only when both values are non-empty and the
+   checkout is under the configured root after best-effort
+   canonicalization. Otherwise, the default path identity applies. The
+   collection then derives from the configured identity plus the checkout's
    path relative to the root (`src/vectordb/mod.rs`,
    `scoped_collection_identity`) — the multi-host shared-collection mode.
    One variable without the other is ignored.
@@ -118,7 +120,8 @@ second tier.
 - Collection identity: by default the absolute path string with symlinks
   not resolved — keep CLI and MCP callers passing the same path form. With
   both `SINDEXER_COLLECTION_ROOT` and `SINDEXER_COLLECTION_IDENTITY` set,
-  identity is root-relative instead (see step 1).
+  identity is root-relative only when the checkout is under the configured
+  root (see step 1).
 
 ## Operating modes (reference)
 
