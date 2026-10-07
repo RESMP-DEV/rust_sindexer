@@ -67,6 +67,27 @@ impl VectorStore {
         }
     }
 
+    pub async fn insert_batch(&self, collection: &str, data: &[InsertRow]) -> Result<usize> {
+        debug!(collection, batch_size = data.len(), "inserting batch");
+        match self {
+            Self::Local(store) => {
+                let docs: Vec<_> = data
+                    .iter()
+                    .map(|row| local::LocalDoc {
+                        id: row.id.to_string(),
+                        content: row.content.clone(),
+                        vector: row.vector.clone(),
+                        metadata: row.metadata.clone(),
+                    })
+                    .collect();
+                let inserted = docs.len();
+                store.insert_docs(collection, docs)?;
+                Ok(inserted)
+            }
+            Self::Milvus(client) => client.insert_batch(collection, data).await,
+        }
+    }
+
     pub async fn search(
         &self,
         collection: &str,

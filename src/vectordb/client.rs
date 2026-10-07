@@ -489,33 +489,53 @@ impl MilvusClient {
         Ok(())
     }
 
-    /// Batch insert rows into a collection.
+    /// Insert rows without a preceding delete.
     ///
-    /// # Arguments
-    /// * `collection` - Collection name
-    /// * `data` - Rows to insert
+    /// The first request uses the insert endpoint. A transport retry uses
+    /// upsert because the failed response may belong to a request Milvus
+    /// actually committed; upsert prevents duplicate primary keys on that
+    /// recovery path without generating tombstones on the normal path.
+    pub async fn insert_batch(&self, collection: &str, data: &[InsertRow]) -> Result<usize> {
+        self.write_batch(collection, data, true).await
+    }
+
+    /// Upsert rows, replacing any existing primary keys.
     pub async fn upsert_batch(&self, collection: &str, data: &[InsertRow]) -> Result<usize> {
+        self.write_batch(collection, data, false).await
+    }
+
+    async fn write_batch(
+        &self,
+        collection: &str,
+        data: &[InsertRow],
+        insert_first_attempt: bool,
+    ) -> Result<usize> {
         if data.is_empty() {
             return Ok(0);
         }
 
         let batch_size = data.len();
+        let initial_operation = if insert_first_attempt {
+            "insert"
+        } else {
+            "upsert"
+        };
         debug!(
             collection,
             rows = batch_size,
-            "Milvus upsert_batch starting"
+            initial_operation,
+            "Milvus write_batch starting"
         );
         let start = std::time::Instant::now();
         const MAX_RETRIES: u32 = 3;
-        let url = format!("{}/v2/vectordb/entities/upsert", self.base_url);
 
         let request_body = InsertRequest {
             db_name: "default".to_string(),
             collection_name: collection.to_string(),
             data: data.to_vec(),
         };
-        let body_bytes = serde_json::to_vec(&request_body)
-            .context("failed to serialize upsert batch request")?;
+        let body_bytes =
+            serde_json::to_vec(&request_body).context("failed to serialize batch request")?;
 
         let mut last_err = None;
         for attempt in 0..=MAX_RETRIES {
@@ -524,6 +544,12 @@ impl MilvusClient {
                 tokio::time::sleep(backoff).await;
             }
 
+            let operation = if attempt == 0 {
+                initial_operation
+            } else {
+                "upsert"
+            };
+            let url = format!("{}/v2/vectordb/entities/{operation}", self.base_url);
             let response = match self
                 .client
                 .post(&url)
@@ -534,7 +560,7 @@ impl MilvusClient {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    warn!(collection, attempt, error = %e, "Milvus upsert_batch request failed");
+                    warn!(collection, attempt, operation, error = %e, "Milvus write_batch request failed");
                     last_err = Some(format!("request failed: {e}"));
                     continue;
                 }
@@ -543,7 +569,7 @@ impl MilvusClient {
             let status = response.status();
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
                 let body = response.text().await.unwrap_or_default();
-                warn!(collection, attempt, status = %status, "Milvus upsert_batch retryable error");
+                warn!(collection, attempt, operation, status = %status, "Milvus write_batch retryable error");
                 last_err = Some(format!("Milvus returned {status}: {body}"));
                 continue;
             }
@@ -551,40 +577,35 @@ impl MilvusClient {
             let response: UpsertResponse = response
                 .json()
                 .await
-                .context("failed to parse upsert batch response")?;
+                .context("failed to parse write_batch response")?;
 
             if response.code != 0 {
                 let msg = response
                     .message
                     .unwrap_or_else(|| "unknown error".to_string());
-                warn!(collection, code = response.code, error = %msg, "Milvus upsert_batch rejected");
-                anyhow::bail!("upsert batch failed: {}", msg);
+                warn!(collection, attempt, operation, code = response.code, error = %msg, "Milvus write_batch rejected");
+                anyhow::bail!("{operation} batch failed: {msg}");
             }
 
-            debug!(
-                collection,
-                rows = batch_size,
-                inserted = response
-                    .data
-                    .as_ref()
-                    .map(|data| data.upsert_count)
-                    .unwrap_or(batch_size),
-                elapsed_ms = start.elapsed().as_millis() as u64,
-                "Milvus upsert_batch completed"
-            );
-            return Ok(response
+            let accepted = response
                 .data
                 .map(|data| data.upsert_count)
-                .unwrap_or(batch_size));
+                .unwrap_or(batch_size);
+            debug!(
+                collection,
+                attempt,
+                operation,
+                rows = batch_size,
+                accepted,
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                "Milvus write_batch completed"
+            );
+            return Ok(accepted);
         }
 
         let err_msg = last_err.unwrap_or_else(|| "unknown error".to_string());
-        warn!(collection, retries = MAX_RETRIES, error = %err_msg, "Milvus upsert_batch exhausted retries");
-        anyhow::bail!(
-            "upsert batch failed after {} retries: {}",
-            MAX_RETRIES,
-            err_msg
-        )
+        warn!(collection, retries = MAX_RETRIES, error = %err_msg, "Milvus write_batch exhausted retries");
+        anyhow::bail!("batch write failed after {MAX_RETRIES} retries: {err_msg}")
     }
 
     /// Delete entities by primary-key IDs.

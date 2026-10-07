@@ -79,6 +79,17 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ### Fixed
 
+- Markdown and other non-AST chunks now derive their ID from chunk content and
+  position instead of a positional counter, so editing a document creates a new
+  chunk ID that targeted deletes can remove instead of reusing the old primary
+  key. The manifest records the chunk-identity version, so indexes built with
+  the old IDs are rebuilt once instead of mixing schemes.
+- Vector writes use the insert endpoint when all rows are intended as new data.
+  Milvus implements `upsert` as delete plus insert, so the prior writer created
+  one tombstone per inserted row, including during full rebuilds. Lost-response
+  retries still switch to upsert to avoid duplicate primary keys.
+- Incremental updates skip re-embedding chunks whose stable IDs were recorded
+  for the same file and remain unchanged.
 - Incremental Milvus updates now record chunk IDs per file and delete only
   primary keys that disappeared. Previously every modified file was deleted by
   `relative_path` filter before all of its chunks were upserted again, doubling

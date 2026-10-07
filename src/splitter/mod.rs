@@ -241,11 +241,11 @@ fn split_markdown_chunks(
 ) -> Vec<CodeChunk> {
     let mut chunks = Vec::new();
 
-    for (section_idx, (start_line, end_line, content)) in sections.iter().enumerate() {
+    for (start_line, end_line, content) in sections.iter() {
         let section_lines = content.lines().count();
         if section_lines <= lines_per_chunk.max(1) {
             chunks.push(CodeChunk {
-                id: format!("{relative_path}:md:{section_idx}"),
+                id: fallback_chunk_id(relative_path, *start_line, content),
                 content: content.clone(),
                 file_path: path.to_path_buf(),
                 relative_path: relative_path.to_string(),
@@ -256,7 +256,10 @@ fn split_markdown_chunks(
             continue;
         }
 
-        let section_chunks = split_by_lines(
+        // Shift line numbers into whole-file coordinates before deriving the
+        // ID, so the ID depends only on the chunk's final position and content
+        // and not on which markdown section it came from.
+        let mut section_chunks = split_by_lines(
             content,
             path,
             relative_path,
@@ -264,22 +267,32 @@ fn split_markdown_chunks(
             lines_per_chunk,
             overlap_lines,
         );
-
-        chunks.extend(
-            section_chunks
-                .into_iter()
-                .enumerate()
-                .map(|(sub_idx, mut chunk)| {
-                    let chunk_line_count = chunk.end_line - chunk.start_line;
-                    chunk.id = format!("{relative_path}:md:{section_idx}:{sub_idx}");
-                    chunk.start_line = start_line + chunk.start_line - 1;
-                    chunk.end_line = (chunk.start_line + chunk_line_count).min(*end_line);
-                    chunk
-                }),
-        );
+        for chunk in &mut section_chunks {
+            let line_count = chunk.end_line - chunk.start_line;
+            chunk.start_line = start_line + chunk.start_line - 1;
+            chunk.end_line = (chunk.start_line + line_count).min(*end_line);
+        }
+        chunks.extend(section_chunks);
     }
 
     chunks
+}
+
+/// Stable ID for chunks produced by the non-AST fallback splitters.
+///
+/// Markdown and line-splitter chunks previously used positional IDs, so
+/// editing a file reused the same primary key for different content and the
+/// row was silently overwritten or duplicated. Deriving the ID from the chunk
+/// content, like the AST extractor does, makes an edited chunk a new row that
+/// targeted deletes can remove. The positional counter is retained in the ID
+/// so two identical chunks in one file stay distinct.
+fn fallback_chunk_id(relative_path: &str, start_line: u32, content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(relative_path.as_bytes());
+    hasher.update(start_line.to_le_bytes());
+    hasher.update(content.as_bytes());
+    format!("{}:fallback:{:x}", relative_path, hasher.finalize())
 }
 
 fn is_markdown_heading(line: &str) -> bool {
@@ -304,7 +317,6 @@ fn split_by_lines(
     let step = lines_per_chunk.saturating_sub(overlap_lines).max(1);
     let mut chunks = Vec::new();
     let mut start = 0usize;
-    let mut chunk_idx = 0usize;
 
     while start < lines.len() {
         let end = (start + lines_per_chunk).min(lines.len());
@@ -312,7 +324,7 @@ fn split_by_lines(
 
         if !content.trim().is_empty() {
             chunks.push(CodeChunk {
-                id: format!("{relative_path}:lines:{chunk_idx}"),
+                id: fallback_chunk_id(relative_path, start as u32 + 1, &content),
                 content,
                 file_path: path.to_path_buf(),
                 relative_path: relative_path.to_string(),
@@ -320,7 +332,6 @@ fn split_by_lines(
                 end_line: end as u32,
                 language: language.to_string(),
             });
-            chunk_idx += 1;
         }
 
         if end >= lines.len() {
@@ -434,6 +445,32 @@ fn goodbye() {
         assert!(!chunks.is_empty());
         assert_eq!(chunks[0].language, "yaml");
         assert!(chunks.iter().all(|chunk| !chunk.content.trim().is_empty()));
+    }
+
+    #[test]
+    fn fallback_chunk_ids_change_with_content() {
+        let source_a = "fn one() {}\nfn two() {}\n";
+        let source_b = "fn one_edited() {}\nfn two() {}\n";
+        let splitter = CodeSplitter::new(Config::default());
+        let a = splitter.fallback_chunks(
+            Path::new("test.rs"),
+            "test.rs",
+            source_a,
+            "rs",
+            Some("rust"),
+        );
+        let b = splitter.fallback_chunks(
+            Path::new("test.rs"),
+            "test.rs",
+            source_b,
+            "rs",
+            Some("rust"),
+        );
+
+        assert!(!a.is_empty());
+        assert!(!b.is_empty());
+        assert_ne!(a[0].id, b[0].id);
+        assert_eq!(a[0].id, a[0].id);
     }
 
     #[test]
