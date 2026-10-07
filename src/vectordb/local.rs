@@ -101,18 +101,37 @@ impl LocalStore {
         debug!(
             collection = collection_name,
             docs = count,
-            "Inserting docs into local store"
+            "Upserting docs into local store"
         );
         let mut collections = self.collections.lock();
         let collection = collections
             .entry(collection_name.to_string())
             .or_insert_with(|| self.load_collection(collection_name).unwrap_or_default());
-        collection.docs.extend(docs);
+
+        // Replace existing ids in place and append the rest, so a repeated
+        // chunk id overwrites its row instead of duplicating it. This mirrors
+        // the Milvus upsert contract the CLI and MCP paths rely on.
+        let mut positions: HashMap<String, usize> = collection
+            .docs
+            .iter()
+            .enumerate()
+            .map(|(index, doc)| (doc.id.clone(), index))
+            .collect();
+        for doc in docs {
+            match positions.get(&doc.id).copied() {
+                Some(index) => collection.docs[index] = doc,
+                None => {
+                    positions.insert(doc.id.clone(), collection.docs.len());
+                    collection.docs.push(doc);
+                }
+            }
+        }
+
         self.persist_collection(collection_name, collection)?;
         debug!(
             collection = collection_name,
             total_docs = collection.docs.len(),
-            "Insert completed"
+            "Local upsert completed"
         );
         Ok(())
     }

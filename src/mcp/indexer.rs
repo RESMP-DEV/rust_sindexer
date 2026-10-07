@@ -490,6 +490,32 @@ async fn run_index_codebase(
     let total_chunks = all_chunks.len();
     let current_chunk_ids_by_path = chunk_ids_by_path(&all_chunks);
 
+    // Skip chunks whose stable ID already survived the previous run. Their
+    // vectors are unchanged, so re-embedding them costs provider tokens and
+    // server CPU and rewrites rows that do not need rewriting. The decision is
+    // made per file so a chunk ID is only reused for the same file, and files
+    // that this run is rewriting are excluded so their rows get refreshed.
+    if embeddings_enabled && !full_reindex {
+        let unchanged: BTreeSet<String> = unchanged_chunk_ids(
+            &previous_chunk_ids,
+            &current_chunk_ids_by_path,
+            &stale_relative_paths,
+        );
+        let before = all_chunks.len();
+        all_chunks.retain(|chunk| !unchanged.contains(&chunk.id));
+        let skipped = before - all_chunks.len();
+        if skipped > 0 {
+            info!(
+                collection = %collection_name,
+                skipped_chunks = skipped,
+                "skipped chunks whose vectors are already current"
+            );
+            warnings.push(format!(
+                "skipped {skipped} unchanged chunks that were already indexed"
+            ));
+        }
+    }
+
     if embeddings_enabled && !full_reindex {
         if let Err(e) = delete_stale_vectors(
             state,
@@ -578,9 +604,12 @@ async fn run_index_codebase(
                     })
                     .collect();
 
+                // Rows for unchanged chunk ids were deleted by this run's
+                // targeted cleanup, so insert is correct and avoids the
+                // delete-then-insert cycle that Milvus upsert performs.
                 let mut inserted = 0usize;
                 for rows in insert_rows.chunks(MILVUS_BATCH_SIZE) {
-                    inserted += vs.upsert_batch(&collection, rows).await?;
+                    inserted += vs.insert_batch(&collection, rows).await?;
                 }
 
                 drop(permit);
@@ -993,6 +1022,35 @@ fn resolve_manifest_chunk_ids(
     previous_chunk_ids.get(relative_path).cloned()
 }
 
+/// Chunk IDs a partial reindex can keep as-is.
+///
+/// An ID is reusable only when the previous run recorded it for the same
+/// relative path, the current run still produces it, and this run is not
+/// rewriting that file. Anything else is re-embedded, so a missing or stale
+/// manifest entry degrades to extra work rather than a stale vector.
+fn unchanged_chunk_ids(
+    previous_chunk_ids: &BTreeMap<String, Vec<String>>,
+    current_chunk_ids_by_path: &BTreeMap<String, Vec<String>>,
+    stale_relative_paths: &[String],
+) -> BTreeSet<String> {
+    let stale: BTreeSet<&str> = stale_relative_paths.iter().map(String::as_str).collect();
+    let mut reusable = BTreeSet::new();
+    for (relative_path, previous_ids) in previous_chunk_ids {
+        if stale.contains(relative_path.as_str()) {
+            continue;
+        }
+        let Some(current_ids) = current_chunk_ids_by_path.get(relative_path) else {
+            continue;
+        };
+        for id in previous_ids {
+            if current_ids.contains(id) {
+                reusable.insert(id.clone());
+            }
+        }
+    }
+    reusable
+}
+
 fn chunk_ids_by_path(chunks: &[CodeChunk]) -> BTreeMap<String, Vec<String>> {
     let mut by_path = BTreeMap::<String, BTreeSet<String>>::new();
     for chunk in chunks {
@@ -1172,7 +1230,7 @@ mod tests {
                 }),
             ),
             (
-                "/v2/vectordb/entities/upsert",
+                "/v2/vectordb/entities/insert",
                 serde_json::json!({
                     "code": 0
                 }),
@@ -1280,7 +1338,9 @@ mod tests {
                 } else if request_line.contains("/v2/vectordb/collections/create") {
                     *has_collection.lock().unwrap() = true;
                     json!({ "code": 0, "data": { "upsertCount": 1 } }).to_string()
-                } else if request_line.contains("/v2/vectordb/entities/upsert") {
+                } else if request_line.contains("/v2/vectordb/entities/insert")
+                    || request_line.contains("/v2/vectordb/entities/upsert")
+                {
                     let count = serde_json::from_str::<serde_json::Value>(body)
                         .ok()
                         .and_then(|payload| {
@@ -1290,7 +1350,12 @@ mod tests {
                                 .map(|rows| rows.len())
                         })
                         .unwrap_or(1);
-                    json!({ "code": 0, "data": { "upsertCount": count } }).to_string()
+                    let accepted = if request_line.contains("/v2/vectordb/entities/upsert") {
+                        json!({ "upsertCount": count })
+                    } else {
+                        json!({ "insertCount": count })
+                    };
+                    json!({ "code": 0, "data": accepted }).to_string()
                 } else if request_line.contains("/v2/vectordb/entities/delete") {
                     if let Ok(payload) = serde_json::from_str::<serde_json::Value>(body) {
                         deletes.lock().unwrap().push(payload);
@@ -1901,6 +1966,13 @@ mod tests {
                 "/v2/vectordb/collections/create",
                 serde_json::json!({
                     "code": 0
+                }),
+            ),
+            (
+                "/v2/vectordb/entities/insert",
+                serde_json::json!({
+                    "code": 1,
+                    "message": "insert rejected"
                 }),
             ),
             (

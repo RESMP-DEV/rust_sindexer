@@ -27,6 +27,10 @@ pub struct IndexInputs {
     pub embedding_passage_prefix_sha256: String,
     #[serde(default)]
     pub embedding_dimension: usize,
+    /// Chunk identity scheme. Zero is the implicit value in legacy manifests;
+    /// version 2 derives fallback IDs from content as well as position.
+    #[serde(default)]
+    pub chunk_identity_version: u16,
 }
 
 fn default_max_file_size() -> u64 {
@@ -58,6 +62,7 @@ impl IndexInputs {
                 format!("{:x}", Sha256::digest(embedding_passage_prefix.as_bytes()))
             },
             embedding_dimension,
+            chunk_identity_version: 2,
         }
     }
 }
@@ -333,6 +338,12 @@ mod tests {
         }"#;
         let manifest: IndexManifest = serde_json::from_str(legacy).unwrap();
         assert_eq!(manifest.files[0].chunk_ids, None);
+        assert_eq!(manifest.inputs.chunk_identity_version, 0);
+        let current_inputs = IndexInputs {
+            chunk_identity_version: 2,
+            ..manifest.inputs.clone()
+        };
+        assert!(!manifest.matches_index_inputs("collection", &current_inputs));
     }
 
     #[test]
@@ -386,6 +397,7 @@ mod tests {
             follow_symlinks: false,
             embedding_passage_prefix_sha256: String::new(),
             embedding_dimension: 384,
+            chunk_identity_version: 2,
         };
 
         let previous = IndexManifest {
@@ -433,6 +445,7 @@ mod tests {
             follow_symlinks: false,
             embedding_passage_prefix_sha256: String::new(),
             embedding_dimension: 384,
+            chunk_identity_version: 2,
         };
         let store = ManifestStore;
         let files = vec![src.join("lib.rs")];

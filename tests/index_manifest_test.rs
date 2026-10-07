@@ -50,6 +50,7 @@ fn default_inputs() -> IndexInputs {
         follow_symlinks: false,
         embedding_passage_prefix_sha256: String::new(),
         embedding_dimension: 384,
+        chunk_identity_version: 2,
     }
 }
 
