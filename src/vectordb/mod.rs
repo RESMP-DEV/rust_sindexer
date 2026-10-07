@@ -6,6 +6,8 @@ pub use local::LocalStore;
 
 use anyhow::Result;
 use sha2::{Digest, Sha256};
+
+use crate::vectordb::client::milvus_id_for_chunk_id;
 use std::borrow::Cow;
 use std::env;
 use std::path::Path;
@@ -112,6 +114,32 @@ impl VectorStore {
             Self::Milvus(client) => {
                 let filter = build_relative_path_milvus_filter(relative_paths);
                 client.delete(collection, &filter).await
+            }
+        }
+    }
+
+    /// Delete only the listed chunk primary keys.
+    ///
+    /// This is the preferred incremental-update path. A whole-file delete
+    /// tombstones every chunk that is about to be upserted again; a primary-key
+    /// delete touches only chunks whose stable IDs disappeared.
+    pub async fn delete_by_ids(&self, collection: &str, chunk_ids: &[String]) -> Result<()> {
+        if chunk_ids.is_empty() {
+            return Ok(());
+        }
+        debug!(
+            collection,
+            chunk_count = chunk_ids.len(),
+            "deleting by chunk ids"
+        );
+        match self {
+            Self::Local(store) => store.delete_by_ids(collection, chunk_ids),
+            Self::Milvus(client) => {
+                let ids = chunk_ids
+                    .iter()
+                    .map(|id| milvus_id_for_chunk_id(id))
+                    .collect::<Vec<_>>();
+                client.delete_by_ids(collection, &ids).await
             }
         }
     }

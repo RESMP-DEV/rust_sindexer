@@ -79,6 +79,11 @@ All notable changes to `rust_sindexer` will be documented in this file.
 
 ### Fixed
 
+- Incremental Milvus updates now record chunk IDs per file and delete only
+  primary keys that disappeared. Previously every modified file was deleted by
+  `relative_path` filter before all of its chunks were upserted again, doubling
+  tombstone volume and driving recurring compaction work. Manifests without
+  chunk IDs retain the old whole-file fallback for correctness.
 - The local-embedding probe uses a 1-second connect timeout and parses the
   first JSON value from the response, so chunked transfer encoding no longer
   silently disables the auto-default embedding endpoint.
