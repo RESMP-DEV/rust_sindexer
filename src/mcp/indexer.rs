@@ -3,6 +3,7 @@
 //! Pipeline: walk → split (rayon) → embed (batched) → insert (streamed).
 //! When embeddings are disabled, only the lexical index is populated.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -257,6 +258,7 @@ async fn run_index_codebase(
     let mut full_reindex = force;
     let mut files_to_index = files.clone();
     let mut stale_relative_paths = Vec::new();
+    let mut previous_chunk_ids: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut cached_fingerprints: Option<Vec<FileFingerprint>> = None;
 
     if !force {
@@ -333,7 +335,7 @@ async fn run_index_codebase(
                         .iter()
                         .chain(diff.modified.iter())
                         .cloned()
-                        .collect::<std::collections::BTreeSet<_>>();
+                        .collect::<BTreeSet<_>>();
                     files_to_index = files
                         .iter()
                         .filter(|file_path| {
@@ -342,6 +344,15 @@ async fn run_index_codebase(
                         .cloned()
                         .collect();
 
+                    previous_chunk_ids = previous
+                        .files
+                        .iter()
+                        .filter_map(|file| {
+                            file.chunk_ids
+                                .clone()
+                                .map(|ids| (file.relative_path.clone(), ids))
+                        })
+                        .collect();
                     stale_relative_paths = diff
                         .deleted
                         .iter()
@@ -378,17 +389,6 @@ async fn run_index_codebase(
         return Err(e).context("Failed to prepare lexical index");
     }
 
-    if !stale_relative_paths.is_empty() && embeddings_enabled {
-        if let Err(e) = state
-            .vector_store
-            .delete_by_relative_paths(&collection_name, &stale_relative_paths)
-            .await
-        {
-            update_status_failed(state, path).await;
-            return Err(e).context("Failed to delete stale vectors");
-        }
-    }
-
     {
         let mut status = state.indexing_status.write().await;
         status.total_files = files_to_index.len();
@@ -398,10 +398,14 @@ async fn run_index_codebase(
         if let Err(e) = write_manifest(
             state,
             path,
-            &collection_name,
-            &index_inputs,
-            &files,
-            cached_fingerprints.take(),
+            ManifestWrite {
+                collection_name: &collection_name,
+                index_inputs: &index_inputs,
+                files: &files,
+                cached_fingerprints: cached_fingerprints.take(),
+                current_chunk_ids_by_path: &BTreeMap::new(),
+                previous_chunk_ids: &previous_chunk_ids,
+            },
         ) {
             update_status_failed(state, path).await;
             return Err(e).context("Failed to write index manifest");
@@ -484,6 +488,23 @@ async fn run_index_codebase(
     }
 
     let total_chunks = all_chunks.len();
+    let current_chunk_ids_by_path = chunk_ids_by_path(&all_chunks);
+
+    if embeddings_enabled && !full_reindex {
+        if let Err(e) = delete_stale_vectors(
+            state,
+            &collection_name,
+            &stale_relative_paths,
+            &previous_chunk_ids,
+            &current_chunk_ids_by_path,
+        )
+        .await
+        {
+            update_status_failed(state, path).await;
+            return Err(e);
+        }
+    }
+
     info!(
         "Split {} files into {} chunks ({} warnings)",
         files_to_index.len(),
@@ -674,10 +695,14 @@ async fn run_index_codebase(
     if let Err(e) = write_manifest(
         state,
         path,
-        &collection_name,
-        &index_inputs,
-        &files,
-        cached_fingerprints.take(),
+        ManifestWrite {
+            collection_name: &collection_name,
+            index_inputs: &index_inputs,
+            files: &files,
+            cached_fingerprints: cached_fingerprints.take(),
+            current_chunk_ids_by_path: &current_chunk_ids_by_path,
+            previous_chunk_ids: &previous_chunk_ids,
+        },
     ) {
         update_status_failed(state, path).await;
         return Err(e).context("Failed to write index manifest");
@@ -906,24 +931,151 @@ async fn prepare_lexical_index(
     Ok(())
 }
 
-fn write_manifest(
-    state: &IndexerState,
-    path: &Path,
-    collection_name: &str,
-    index_inputs: &IndexInputs,
-    files: &[std::path::PathBuf],
+/// Everything the manifest writer needs beyond the store and root path.
+struct ManifestWrite<'a> {
+    collection_name: &'a str,
+    index_inputs: &'a IndexInputs,
+    files: &'a [std::path::PathBuf],
     cached_fingerprints: Option<Vec<FileFingerprint>>,
-) -> Result<()> {
+    current_chunk_ids_by_path: &'a BTreeMap<String, Vec<String>>,
+    previous_chunk_ids: &'a BTreeMap<String, Vec<String>>,
+}
+
+fn write_manifest(state: &IndexerState, path: &Path, write: ManifestWrite<'_>) -> Result<()> {
+    let ManifestWrite {
+        collection_name,
+        index_inputs,
+        files,
+        cached_fingerprints,
+        current_chunk_ids_by_path,
+        previous_chunk_ids,
+    } = write;
     match cached_fingerprints {
-        Some(fp) => {
-            state
-                .manifest_store
-                .write_with_fingerprints(path, collection_name, index_inputs, fp)
+        Some(mut fingerprints) => {
+            for fingerprint in &mut fingerprints {
+                fingerprint.chunk_ids = resolve_manifest_chunk_ids(
+                    &fingerprint.relative_path,
+                    current_chunk_ids_by_path,
+                    previous_chunk_ids,
+                );
+            }
+            state.manifest_store.write_with_fingerprints(
+                path,
+                collection_name,
+                index_inputs,
+                fingerprints,
+            )
         }
-        None => state
-            .manifest_store
-            .write_for_files(path, collection_name, index_inputs, files),
+        None => state.manifest_store.write_for_files_with_chunk_ids(
+            path,
+            collection_name,
+            index_inputs,
+            files,
+            current_chunk_ids_by_path,
+        ),
     }
+}
+
+/// Chunk IDs to persist for one file.
+///
+/// A file that was not part of this run keeps the IDs recorded by the previous
+/// run, so later incremental deletes stay targeted. A file that produced no
+/// chunks in this run records an empty list rather than `None`, which is what
+/// marks "its vectors were all deleted" instead of "unknown, delete by path".
+fn resolve_manifest_chunk_ids(
+    relative_path: &str,
+    current_chunk_ids_by_path: &BTreeMap<String, Vec<String>>,
+    previous_chunk_ids: &BTreeMap<String, Vec<String>>,
+) -> Option<Vec<String>> {
+    if let Some(ids) = current_chunk_ids_by_path.get(relative_path) {
+        return Some(ids.clone());
+    }
+    previous_chunk_ids.get(relative_path).cloned()
+}
+
+fn chunk_ids_by_path(chunks: &[CodeChunk]) -> BTreeMap<String, Vec<String>> {
+    let mut by_path = BTreeMap::<String, BTreeSet<String>>::new();
+    for chunk in chunks {
+        by_path
+            .entry(chunk.relative_path.clone())
+            .or_default()
+            .insert(chunk.id.clone());
+    }
+    by_path
+        .into_iter()
+        .map(|(path, ids)| (path, Vec::from_iter(ids)))
+        .collect()
+}
+
+/// Remove vectors that no longer exist after a partial reindex.
+///
+/// Modified files are deleted by primary key, not by path: a whole-file delete
+/// tombstones every chunk that the very same run upserts again, so each update
+/// inflates Milvus's delete log and drives endless compaction work. Files whose
+/// previous chunk IDs were never recorded (older manifests, or lexical-only
+/// runs) still fall back to a whole-file delete, which is correct but keeps the
+/// old tombstone behavior until the next full rebuild records real IDs.
+async fn delete_stale_vectors(
+    state: &IndexerState,
+    collection_name: &str,
+    stale_relative_paths: &[String],
+    previous_chunk_ids: &BTreeMap<String, Vec<String>>,
+    current_chunk_ids_by_path: &BTreeMap<String, Vec<String>>,
+) -> Result<()> {
+    if stale_relative_paths.is_empty() {
+        return Ok(());
+    }
+
+    let mut stale_chunk_ids = Vec::new();
+    let mut fallback_relative_paths = Vec::new();
+
+    for stale_path in stale_relative_paths {
+        match previous_chunk_ids.get(stale_path) {
+            Some(previous_ids) => {
+                let current_ids = BTreeSet::from_iter(
+                    current_chunk_ids_by_path
+                        .get(stale_path)
+                        .into_iter()
+                        .flat_map(|ids| ids.iter().cloned()),
+                );
+                stale_chunk_ids.extend(
+                    previous_ids
+                        .iter()
+                        .filter(|id| !current_ids.contains(*id))
+                        .cloned(),
+                );
+            }
+            None => fallback_relative_paths.push(stale_path.clone()),
+        }
+    }
+
+    if !stale_chunk_ids.is_empty() {
+        info!(
+            collection = collection_name,
+            chunk_count = stale_chunk_ids.len(),
+            "deleting stale chunk vectors by primary key"
+        );
+        state
+            .vector_store
+            .delete_by_ids(collection_name, &stale_chunk_ids)
+            .await
+            .context("Failed to delete stale chunk vectors")?;
+    }
+
+    if !fallback_relative_paths.is_empty() {
+        info!(
+            collection = collection_name,
+            path_count = fallback_relative_paths.len(),
+            "deleting stale vectors by path for files without recorded chunk ids"
+        );
+        state
+            .vector_store
+            .delete_by_relative_paths(collection_name, &fallback_relative_paths)
+            .await
+            .context("Failed to delete stale vectors")?;
+    }
+
+    Ok(())
 }
 
 fn relative_path(root: &Path, file_path: &Path) -> String {
@@ -936,6 +1088,12 @@ fn relative_path(root: &Path, file_path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// How long a mock HTTP server waits for its next connection before exiting.
+    ///
+    /// Generous enough to survive scheduler pressure when the full test suite runs
+    /// in parallel; tests that need prompt teardown await the server explicitly.
+    const MOCK_SERVER_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
     use super::*;
     use std::collections::HashMap;
     use std::fs;
@@ -984,8 +1142,17 @@ mod tests {
     }
 
     impl MockHttpServer {
+        /// Stop the mock server.
+        ///
+        /// The accept loop is aborted instead of awaited: it is only a socket
+        /// with canned responses, and awaiting it would block for the whole
+        /// idle timeout. The timeout itself is the safety net for tests that
+        /// never reach this method, which is what previously made unrelated
+        /// tests fail under full parallel load with "failed to prepare vector
+        /// collection".
         async fn wait(self) {
-            self.handle.await.unwrap();
+            self.handle.abort();
+            let _ = self.handle.await;
         }
     }
 
@@ -1040,8 +1207,7 @@ mod tests {
         let handle = tokio::spawn(async move {
             loop {
                 let accept =
-                    tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept())
-                        .await;
+                    tokio::time::timeout(MOCK_SERVER_IDLE_TIMEOUT, listener.accept()).await;
                 let Ok(Ok((mut stream, _))) = accept else {
                     break;
                 };
@@ -1087,6 +1253,73 @@ mod tests {
         }
     }
 
+    /// A Milvus mock that records every delete request body, so a test can
+    /// assert which rows an incremental update actually tombstones.
+    async fn spawn_recording_mock_milvus_server(
+        deletes: Arc<Mutex<Vec<serde_json::Value>>>,
+    ) -> MockHttpServer {
+        let has_collection = Arc::new(Mutex::new(false));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let accept =
+                    tokio::time::timeout(MOCK_SERVER_IDLE_TIMEOUT, listener.accept()).await;
+                let Ok(Ok((mut stream, _))) = accept else {
+                    break;
+                };
+
+                let request = read_http_request(&mut stream).await.unwrap();
+                let request_line = request.lines().next().unwrap_or_default();
+                let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
+
+                let response_body = if request_line.contains("/v2/vectordb/collections/has") {
+                    let has = *has_collection.lock().unwrap();
+                    json!({ "code": 0, "data": { "has": has } }).to_string()
+                } else if request_line.contains("/v2/vectordb/collections/create") {
+                    *has_collection.lock().unwrap() = true;
+                    json!({ "code": 0, "data": { "upsertCount": 1 } }).to_string()
+                } else if request_line.contains("/v2/vectordb/entities/upsert") {
+                    let count = serde_json::from_str::<serde_json::Value>(body)
+                        .ok()
+                        .and_then(|payload| {
+                            payload
+                                .get("data")
+                                .and_then(|d| d.as_array())
+                                .map(|rows| rows.len())
+                        })
+                        .unwrap_or(1);
+                    json!({ "code": 0, "data": { "upsertCount": count } }).to_string()
+                } else if request_line.contains("/v2/vectordb/entities/delete") {
+                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(body) {
+                        deletes.lock().unwrap().push(payload);
+                    }
+                    json!({ "code": 0, "data": { "deleteCount": 0 } }).to_string()
+                } else {
+                    json!({ "code": 404, "message": "not found" }).to_string()
+                };
+
+                let status = if response_body.contains("\"code\":404") {
+                    "404 Not Found"
+                } else {
+                    "200 OK"
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        MockHttpServer {
+            base_url: format!("http://{addr}"),
+            handle,
+        }
+    }
+
     async fn spawn_mock_embedding_server(response_body: serde_json::Value) -> MockHttpServer {
         spawn_mock_json_server(HashMap::from([("/v1/embeddings", response_body)])).await
     }
@@ -1098,8 +1331,7 @@ mod tests {
         let handle = tokio::spawn(async move {
             loop {
                 let accept =
-                    tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept())
-                        .await;
+                    tokio::time::timeout(MOCK_SERVER_IDLE_TIMEOUT, listener.accept()).await;
                 let Ok(Ok((mut stream, _))) = accept else {
                     break;
                 };
@@ -1153,8 +1385,7 @@ mod tests {
         let handle = tokio::spawn(async move {
             loop {
                 let accept =
-                    tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept())
-                        .await;
+                    tokio::time::timeout(MOCK_SERVER_IDLE_TIMEOUT, listener.accept()).await;
                 let Ok(Ok((mut stream, _))) = accept else {
                     break;
                 };
@@ -1229,8 +1460,7 @@ mod tests {
         let handle = tokio::spawn(async move {
             loop {
                 let accept =
-                    tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept())
-                        .await;
+                    tokio::time::timeout(MOCK_SERVER_IDLE_TIMEOUT, listener.accept()).await;
                 let Ok(Ok((mut stream, _))) = accept else {
                     break;
                 };
@@ -1485,6 +1715,130 @@ mod tests {
             first_result.embeddings_generated
         );
         assert!(manifest_path.exists());
+
+        embedding.wait().await;
+        milvus.wait().await;
+    }
+
+    #[tokio::test]
+    async fn test_incremental_update_deletes_removed_chunks_by_id_not_by_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        let cache_dir = TempDir::new().unwrap();
+        let _cache_lock = set_test_cache_dir_async(cache_dir.path()).await;
+        fs::write(
+            root.join("changing.rs"),
+            "pub fn keep_me() -> i32 {\n    1\n}\n\npub fn remove_me() -> i32 {\n    2\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("deleted.rs"),
+            "pub fn gone() -> i32 {\n    3\n}\n",
+        )
+        .unwrap();
+
+        let deletes = Arc::new(Mutex::new(Vec::new()));
+        let milvus = spawn_recording_mock_milvus_server(deletes.clone()).await;
+        let embedding = spawn_dynamic_mock_embedding_server().await;
+
+        let state = make_test_indexer_state(root, &embedding.base_url, &milvus.base_url, 4);
+        index_codebase(&state, root, false).await.unwrap();
+        assert!(
+            deletes.lock().unwrap().is_empty(),
+            "the first full build must not delete anything"
+        );
+
+        // Drop one function and one file, so the next run must remove exactly
+        // the chunks for `remove_me` and for `deleted.rs`.
+        fs::write(
+            root.join("changing.rs"),
+            "pub fn keep_me() -> i32 {\n    1\n}\n",
+        )
+        .unwrap();
+        fs::remove_file(root.join("deleted.rs")).unwrap();
+
+        index_codebase(&state, root, false).await.unwrap();
+
+        let recorded = deletes.lock().unwrap().clone();
+        assert_eq!(
+            recorded.len(),
+            1,
+            "expected one targeted delete request, got {recorded:?}"
+        );
+        let payload = &recorded[0];
+        let ids = payload
+            .get("ids")
+            .and_then(|ids| ids.as_array())
+            .unwrap_or_else(|| panic!("expected a primary-key delete, got {payload:?}"));
+        assert!(
+            !ids.is_empty(),
+            "targeted delete must name the removed chunks: {payload:?}"
+        );
+        let filter = payload
+            .get("filter")
+            .and_then(|filter| filter.as_str())
+            .unwrap_or_default();
+        assert!(
+            filter.starts_with("id in ["),
+            "a modified file must not be deleted by path filter: {payload:?}"
+        );
+        assert!(
+            !filter.contains("relative_path"),
+            "a modified file must not be deleted by path filter: {payload:?}"
+        );
+
+        embedding.wait().await;
+        milvus.wait().await;
+    }
+
+    #[tokio::test]
+    async fn test_update_after_legacy_manifest_falls_back_to_path_delete() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        let cache_dir = TempDir::new().unwrap();
+        let _cache_lock = set_test_cache_dir_async(cache_dir.path()).await;
+        fs::write(
+            root.join("main.rs"),
+            "fn main() {\n    println!(\"legacy\");\n}\n",
+        )
+        .unwrap();
+
+        let deletes = Arc::new(Mutex::new(Vec::new()));
+        let milvus = spawn_recording_mock_milvus_server(deletes.clone()).await;
+        let embedding = spawn_dynamic_mock_embedding_server().await;
+
+        let state = make_test_indexer_state(root, &embedding.base_url, &milvus.base_url, 4);
+        index_codebase(&state, root, false).await.unwrap();
+
+        // Simulate a manifest written before chunk IDs were tracked.
+        let manifest_path = root.join(".sindexer").join("index-manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        for file in manifest["files"]
+            .as_array_mut()
+            .expect("manifest files array")
+        {
+            file.as_object_mut().unwrap().remove("chunk_ids");
+        }
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        fs::write(
+            root.join("main.rs"),
+            "fn main() {\n    println!(\"edited\");\n}\n",
+        )
+        .unwrap();
+        index_codebase(&state, root, false).await.unwrap();
+
+        let recorded = deletes.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1, "expected one delete, got {recorded:?}");
+        assert!(
+            recorded[0].get("filter").is_some(),
+            "a manifest without chunk ids must fall back to a path delete: {recorded:?}"
+        );
 
         embedding.wait().await;
         milvus.wait().await;

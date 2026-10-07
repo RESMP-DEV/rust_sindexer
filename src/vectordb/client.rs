@@ -587,6 +587,64 @@ impl MilvusClient {
         )
     }
 
+    /// Delete entities by primary-key IDs.
+    pub async fn delete_by_ids(&self, collection: &str, ids: &[i64]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        debug!(
+            collection,
+            id_count = ids.len(),
+            "Milvus delete_by_ids starting"
+        );
+        let url = format!("{}/v2/vectordb/entities/delete", self.base_url);
+
+        #[derive(Serialize)]
+        struct DeleteByIdsRequest<'a> {
+            #[serde(rename = "dbName")]
+            db_name: &'a str,
+            #[serde(rename = "collectionName")]
+            collection_name: &'a str,
+            // Milvus 2.5.3 rejects `ids` without a nonempty filter even though
+            // its REST documentation says either field may be used. Sending the
+            // same ID set in both fields was verified live and keeps the
+            // implementation compatible with that deployed release.
+            filter: String,
+            ids: &'a [i64],
+        }
+
+        let filter = format!(
+            "id in [{}]",
+            ids.iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let response: MilvusResponse = self
+            .client
+            .post(&url)
+            .json(&DeleteByIdsRequest {
+                db_name: "default",
+                collection_name: collection,
+                filter,
+                ids,
+            })
+            .send()
+            .await
+            .context("failed to send delete-by-ids request")?
+            .json()
+            .await
+            .context("failed to parse delete-by-ids response")?;
+
+        if response.code != 0 {
+            let msg = response
+                .message
+                .unwrap_or_else(|| "unknown error".to_string());
+            anyhow::bail!("delete by ids failed: {}", msg);
+        }
+        Ok(())
+    }
+
     /// List all collections in the database.
     pub async fn list_collections(&self) -> Result<Vec<String>> {
         let url = format!("{}/v2/vectordb/collections/list", self.base_url);
