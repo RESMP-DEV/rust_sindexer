@@ -84,6 +84,12 @@ All notable changes to `rust_sindexer` will be documented in this file.
   chunk ID that targeted deletes can remove instead of reusing the old primary
   key. The manifest records the chunk-identity version, so indexes built with
   the old IDs are rebuilt once instead of mixing schemes.
+- The B550 embedding deployment now supports one pinned service per 3090 Ti
+  behind a loopback-only nginx least-connections balancer, while the Mac keeps
+  Milvus and repository authority. Agent-visible `EMBEDDING_URL` and
+  `OPENAI_BASE_URL` both resolve to the tunnel, eliminating silent fallback to
+  the Mac MLX service. PyTorch SDPA (with its CUDA FlashAttention backend) is
+  intentional; the standalone `flash-attn` package is intentionally absent.
 - Vector writes use the insert endpoint when all rows are intended as new data.
   Milvus implements `upsert` as delete plus insert, so the prior writer created
   one tombstone per inserted row, including during full rebuilds. Lost-response
