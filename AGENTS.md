@@ -1,48 +1,140 @@
 # sindexer (Semantic Indexer)
 
-High-performance Rust MCP server for semantic code indexing. Single native binary, no Node.js overhead. Works out of the box with zero external services.
+High-performance Rust MCP server + CLI for semantic code indexing. Single
+native binary, no Node.js overhead. This file is the repo's only instruction
+file (`CLAUDE.md` symlinks to it) and doubles as the **new-machine setup
+guide for the full-scale deployment**: Jina code embeddings + Milvus/Zilliz
+Cloud vector backend. Lexical-only and local-vector modes work with zero
+configuration and are documented in README.md.
 
-## Quick Start
+## New machine setup (full-scale: Jina + Zilliz)
 
-```bash
-cargo build --release
-./target/release/sindexer
-```
+Prerequisites: macOS (Apple Silicon primary), git, Rust stable, `~/.local/bin`
+on PATH, `/usr/local/bin` on PATH, admin rights once (the served-binary
+symlink lives in a root-owned directory), and a GitHub SSH key registered
+for the RESMP-DEV org (or use the HTTPS remote URL in step 1). Steps are
+ordered; verify each before moving on.
 
-No configuration needed. By default, uses BM25 lexical search with a local vector store. Set `EMBEDDING_URL` and optionally `MILVUS_URL` to enable semantic search.
+1. **Clone to the canonical path.** Collections key on the absolute path
+   string (symlinks are NOT resolved), so the checkout location is the index
+   identity for CLI and MCP alike:
 
-Global MCP client configuration (Claude Code `~/.claude.json`, Claude Desktop, etc.):
-```json
-{
-  "mcpServers": {
-    "sindexer": {
-      "command": "/path/to/sindexer"
-    }
-  }
-}
-```
+   ```bash
+   git clone git@github.com:RESMP-DEV/rust_sindexer.git \
+     ~/AlphaHENG/contrib/rust_sindexer
+   ```
 
-AlphaHENG invokes the Rust Index CLI binary directly and supplies its runtime environment from the control machine.
+   A different path works but orphans existing collections for this repo;
+   after moving a checkout, `sindexer clear <old-abs-path>` cleans up (it
+   works on deleted paths). That is the **default** rule; when **both**
+   `SINDEXER_COLLECTION_IDENTITY` and `SINDEXER_COLLECTION_ROOT` are set,
+   identity is root-relative only when both values are non-empty and the
+   checkout is under the configured root after best-effort
+   canonicalization. Otherwise, the default path identity applies. The
+   collection then derives from the configured identity plus the checkout's
+   path relative to the root (`src/vectordb/mod.rs`,
+   `scoped_collection_identity`) — the multi-host shared-collection mode.
+   One variable without the other is ignored.
 
-## Operating Modes
+2. **Build and serve the release binary** (LTO profile; this artifact is the
+   served binary — rebuild it after pulling changes):
 
-- **Lexical only (default)** — No env vars needed. BM25 keyword/symbol search with local vector store. Good for exact matches and code navigation.
-- **Semantic + lexical** — Set `EMBEDDING_URL` to an OpenAI-compatible endpoint. Hybrid RRF fusion of semantic similarity + BM25. Local vector store handles project-scale indexing (<50K chunks).
-- **Full scale** — Set both `EMBEDDING_URL` and `MILVUS_URL` for large-scale deployments with Milvus/Zilliz Cloud as the vector backend.
+   ```bash
+   cargo build --release
+   sudo ln -sf "$PWD/target/release/sindexer" /usr/local/bin/sindexer
+   ```
 
-## Host Compatibility
+3. **Provision `~/.context/.env`** (never committed; the repo holds no
+   secrets — copy values from the existing machine's file or the user's
+   secret store). The binary reads process env only; the PATH wrapper is
+   what sources this file.
 
-- **Apple Silicon macOS (including M-series / M4)** — build and test with the standard Cargo flow.
-- **Linux infra hosts** — same source build, covered in CI.
-- **GPU hosts** — point `EMBEDDING_URL` (or `OPENAI_BASE_URL`) at any OpenAI-compatible GPU-backed embeddings service. The binary itself remains CPU-only and communicates over HTTP.
+   | Variable | Full-scale value | Meaning |
+   |---|---|---|
+   | `EMBEDDING_URL` | `https://api.jina.ai/v1` | OpenAI-compatible embedding endpoint (`OPENAI_BASE_URL` alias) |
+   | `EMBEDDING_API_KEY` | Jina API key | Bearer auth (`OPENAI_API_KEY` alias) |
+   | `EMBEDDING_MODEL` | `jina-code-embeddings-1.5b` | Model name |
+   | `EMBEDDING_DIMENSION` | `1536` | Must match model output; changing it later invalidates manifests and forces full rebuilds |
+   | `MILVUS_URL` | Zilliz cluster endpoint | Enables the Milvus/Zilliz vector store (`MILVUS_ADDRESS` alias) |
+   | `MILVUS_TOKEN` | cluster token | Bearer auth |
 
-## Production Configuration
+   Optional: `EMBEDDING_QUERY_PREFIX` / `EMBEDDING_PASSAGE_PREFIX` (task
+   prefixes), `BATCH_SIZE` (texts per embedding request, default 32 — note
+   the name; the binary does not read `EMBEDDING_BATCH_SIZE` even though
+   the wrapper round-trips it), `SINDEXER_COLLECTION_ROOT`,
+   `SINDEXER_COLLECTION_IDENTITY`. Other variables that live in the same
+   file (`ZILLIZ_CLOUD_*`, `SPLITTER_TYPE`, `EMBEDDING_PROVIDER`,
+   `EMBEDDING_BATCH_SIZE`, …) belong to other fleet tooling; this binary
+   ignores them. Full environment reference including `MAX_FILE_SIZE`,
+   `RUST_LOG`, and defaults: README.md.
 
-Current deployment uses Jina Embeddings + Zilliz Cloud, configured via `~/.context/.env`:
+4. **Install the local ops kit** (PATH wrapper, health monitor, watchdog):
+   follow `deploy/local/README.md` verbatim — symlink `sindexer`,
+   `sindexer-doctor`, and the legacy `rust-indexer` alias into
+   `~/.local/bin`, then copy and bootstrap the
+   `com.local.sindexer-doctor` LaunchAgent (one `--watch` line every 30
+   minutes to `~/Library/Logs/sindexer-doctor.log`). The wrapper sources
+   `~/.context/.env` with caller-env-wins semantics and execs
+   `/usr/local/bin/sindexer`.
 
-- **Embedding**: Jina API (`jina-code-embeddings-1.5b`, 1536-dim) via OpenAI-compatible endpoint at `https://api.jina.ai/v1`
-- **Vector DB**: Zilliz Cloud (managed Milvus) with token auth
-- **Transport**: rmcp native stdio (newline-delimited JSON per MCP spec)
+5. **MCP clients (optional).** With no arguments the binary speaks
+   newline-delimited JSON-RPC on stdio. Point clients at the **wrapper**
+   (`~/.local/bin/sindexer`), not the raw binary: the wrapper is the only
+   place `~/.context/.env` enters, so exec-ing `/usr/local/bin/sindexer`
+   directly silently runs lexical-only at the 384-dim local default. JSON
+   configs cannot expand `~`, so write the absolute path for your user:
+
+   ```json
+   { "mcpServers": { "sindexer": { "command": "/Users/kearm/.local/bin/sindexer" } } }
+   ```
+
+6. **Verify the full path, in order:**
+
+   ```bash
+   command -v sindexer            # → ~/.local/bin/sindexer
+   sindexer --version
+   sindexer collections           # talks to Zilliz: proves MILVUS_URL + token
+   sindexer index ~/some/repo     # full build: Jina embeddings land in Zilliz
+   sindexer search ~/some/repo "main entry point"   # hybrid hits with scores
+   sindexer overview ~/some/repo --human           # structure at a glance
+   sindexer-doctor --json         # exit 0 = healthy; ~60s cycle is normal
+   ```
+
+**GPU host role:** `deploy/b550/` is the Linux compute-machine variant —
+local CUDA Jina embeddings (3090 Ti selection), remote Milvus reached over a
+loopback-only SSH tunnel. Start there, not here, when provisioning the
+second tier.
+
+## Agent operating contract
+
+- `sindexer search <repo> "<concept>"` is the index-first move; grep only to
+  confirm an exact string. After substantial edits to an indexed repo, run
+  `sindexer update <repo>` to keep the index warm.
+- CLI verbs: `index`, `update`, `search`, `overview`, `status`, `clear`,
+  `collections`, `stats`, `drop`, `usage` (`sindexer --help` is canonical).
+- Output is compact JSON on stdout, logs on stderr; usage mistakes exit 2,
+  runtime failures exit 1.
+- Every search and index/update appends a best-effort telemetry event to
+  `~/.context/usage/sindexer.jsonl`; `sindexer usage --human` reports
+  estimated token savings.
+- Collection identity: by default the absolute path string with symlinks
+  not resolved — keep CLI and MCP callers passing the same path form. With
+  both `SINDEXER_COLLECTION_ROOT` and `SINDEXER_COLLECTION_IDENTITY` set,
+  identity is root-relative only when the checkout is under the configured
+  root (see step 1).
+
+## Operating modes (reference)
+
+- **Lexical only (default)** — zero config. BM25 (tantivy) with local store.
+- **Semantic + lexical** — `EMBEDDING_URL` set; local vector store handles
+  project scale (<50K chunks).
+- **Full scale** — `EMBEDDING_URL` + `MILVUS_URL`: Zilliz/Milvus backend.
+  The production configuration described above.
+- **Dev fallback** — neither `EMBEDDING_URL` nor `OPENAI_BASE_URL` has a
+  non-empty value, and an OpenAI-compatible server
+  answers on 127.0.0.1:1234 (LM Studio): used automatically for
+  index/update/search unless `SINDEXER_AUTO_EMBEDDING=0`. Never fires when
+  either variable has a non-empty value.
 
 ## Architecture
 
@@ -54,63 +146,75 @@ Walker (files) → Splitter (chunks) → Embedder (vectors) → Vector Store
                                      Hybrid Fusion (RRF)
 ```
 
-When embeddings are disabled, the pipeline stops after splitting and only populates the lexical index.
+When embeddings are disabled, the pipeline stops after splitting and only
+populates the lexical index.
 
 ## Components
 
-**Walker** (`src/walker/mod.rs`) — Parallel file discovery using the `ignore` crate with native .gitignore support. Filters by extension and extensionless filenames (Dockerfile, Makefile, etc.) during traversal. Uses `config::SUPPORTED_EXTENSIONS` as the single source of truth for 60+ file types.
+**Walker** (`src/walker/mod.rs`) — Parallel file discovery using the
+`ignore` crate with native .gitignore support; `walk_builder` is the shared
+ignore-semantics base (hidden entries skipped, repo/global/exclude
+gitignores, `.contextignore` overlays). Filters by extension and
+extensionless filenames (Dockerfile, Makefile, etc.) via
+`config::SUPPORTED_EXTENSIONS` (60+ types).
 
-**Splitter** (`src/splitter/`) — Tree-sitter AST parsing for semantic code chunking. Extracts functions, classes, structs, traits, impl blocks per language. Splits oversized chunks at line boundaries with configurable overlap. Falls back to markdown heading or line-based splitting for unsupported languages.
+**Overview** (`src/overview.rs`) — Token-bounded repo structure at a
+glance: dir skeleton with per-dir file counts and dominant extensions from
+a live walk over all file types; bytes/4 budget prunes by depth, then by
+subtree size.
 
-Supported AST languages: Python, JavaScript, TypeScript, TSX, Rust, Go, Java, C++, C, Ruby, PHP, Swift, Scala, C#
+**Splitter** (`src/splitter/`) — Tree-sitter AST parsing for semantic code
+chunking. Extracts functions, classes, structs, traits, impl blocks per
+language. Falls back to markdown heading or line-based splitting for
+unsupported languages.
 
-**Embedder** (`src/embedding/mod.rs`) — `Embedder` enum: `Http(EmbeddingClient)` for OpenAI-compatible APIs, or `Disabled` for lexical-only mode. Auto-detected from `EMBEDDING_URL` or `OPENAI_BASE_URL`. Batches 32 texts per request by default (`BATCH_SIZE`). Empty env vars treated as unset.
+Supported AST languages: Python, JavaScript, TypeScript, TSX, Rust, Go,
+Java, C++, C, Ruby, PHP, Swift, Scala, C#
 
-**Vector Store** (`src/vectordb/`) — `VectorStore` enum: `Local(LocalStore)` for brute-force in-memory cosine similarity with JSON disk persistence (~75MB for 50K chunks at 384-dim), or `Milvus(MilvusClient)` for remote Milvus/Zilliz Cloud. Auto-detected from `MILVUS_URL` or `MILVUS_ADDRESS`.
+**Embedder** (`src/embedding/mod.rs`) — `Embedder` enum: `Http` for
+OpenAI-compatible APIs, or `Disabled` for lexical-only. Auto-detected from
+`EMBEDDING_URL` / `OPENAI_BASE_URL`. Batches 32 texts per request
+(`BATCH_SIZE`).
 
-**Lexical Search** (`src/lexical/mod.rs`) — Tantivy-based BM25 index for keyword/symbol search.
+**Vector Store** (`src/vectordb/`) — `VectorStore` enum: `Local`
+(brute-force cosine, JSON disk persistence) or `Milvus`
+(`src/vectordb/client.rs`, Milvus/Zilliz v2 REST API — see
+`docs/milvus-api.md`). Auto-detected from `MILVUS_URL` / `MILVUS_ADDRESS`.
 
-**Hybrid Fusion** (`src/mcp/hybrid.rs`) — Reciprocal Rank Fusion (RRF) combining semantic and lexical results. Works correctly when either source is empty.
+**Lexical Search** (`src/lexical/mod.rs`) — Tantivy-based BM25 index.
 
-**Incremental Indexing** (`src/mcp/manifest.rs`) — File-hash manifest stored at `.sindexer/index-manifest.json`. Tracks SHA-256 per file to skip unchanged files. Use `update_index` for changed-file-only refreshes that must refuse full rebuild fallback; pass `force: true` to `index_codebase` only when a full rebuild is intended.
+**Hybrid Fusion** (`src/mcp/hybrid.rs`) — Reciprocal Rank Fusion (RRF);
+works when either source is empty.
+
+**Incremental Indexing** (`src/mcp/manifest.rs`) — SHA-256 file-hash
+manifest at `.sindexer/index-manifest.json`. `update_index` refreshes
+changed files only and refuses full-rebuild fallback; `force: true` on
+`index_codebase` is the deliberate full rebuild.
 
 ## Key Files
 
-- `src/main.rs` — MCP server entry point, rmcp stdio transport
+- `src/main.rs` — entry point: MCP stdio server (no args) / CLI dispatch
+- `src/cli.rs` — CLI verbs (thin parsers over the MCP-tool cores)
+- `src/overview.rs` — repo-structure overview core
 - `src/types.rs` — CodeChunk, EmbeddingVector, IndexStatus
 - `src/config.rs` — walker/splitter configuration
 - `src/mcp/state.rs` — shared async state with Embedder/VectorStore enums
 - `src/mcp/indexer.rs` — indexing pipeline (lexical-only or full)
-- `src/mcp/hybrid.rs` — hybrid search (semantic + lexical fusion)
-- `src/mcp/manifest.rs` — index manifest for incremental reindexing
+- `src/mcp/hybrid.rs` — hybrid search fusion
+- `src/mcp/manifest.rs` — incremental reindexing manifest
 - `src/mcp/tools.rs` — MCP tool definitions and JSON schemas
-- `src/usage.rs` — usage telemetry (JSONL event log + `usage` verb report)
-- `src/vectordb/local.rs` — brute-force local vector store with disk persistence
-- `src/vectordb/client.rs` — Milvus/Zilliz REST API client
+- `src/usage.rs` — usage telemetry (JSONL log + `usage` verb)
+- `src/vectordb/local.rs`, `src/vectordb/client.rs` — vector stores
+- `deploy/local/` — PATH wrapper, doctor, watchdog LaunchAgent
+- `deploy/b550/` — Linux GPU-host deployment kit
 
 ## MCP Tools
 
-- **index_codebase** — walk, split, embed, and store a directory; may do an initial full build when no compatible index exists
-- **update_index** — update an existing compatible index by touching only changed and deleted files, refusing full rebuild fallback
-- **search_code** — hybrid search (semantic + lexical) over indexed codebase
-- **get_indexing_status** — check indexing progress
-- **clear_index** — remove indexed data (vector + lexical)
-- **list_collections** — list vector collections with row counts
-- **collection_stats** — row count for a specific collection
-- **drop_collection** — permanently delete a collection by name
+index_codebase, update_index, search_code, get_indexing_status,
+clear_index, list_collections, collection_stats, drop_collection.
 
-## Environment Variables
-
-All optional. The server works with zero configuration.
-
-- `EMBEDDING_URL` — Embedding API base URL. Setting this enables semantic search. Any OpenAI-compatible endpoint (Jina, OpenAI, local). `OPENAI_BASE_URL` is also accepted.
-- `EMBEDDING_API_KEY` — API key for the embedding endpoint. Not needed for local servers. `OPENAI_API_KEY` is also accepted.
-- `EMBEDDING_MODEL` — Model name (default: `all-minilm`). Production uses `jina-code-embeddings-1.5b`.
-- `EMBEDDING_DIMENSION` — Vector dimension (default: `384`). Must match your model's output. Jina code embeddings use `1536`.
-- `MILVUS_URL` — Milvus/Zilliz Cloud endpoint. Setting this uses Milvus instead of the local vector store. `MILVUS_ADDRESS` is also accepted.
-- `MILVUS_TOKEN` — Authentication token for Milvus/Zilliz.
-- `MAX_FILE_SIZE` — Maximum file size in bytes (default: `1048576`, 1MB).
-- `RUST_LOG` — Standard tracing filter (default level: `info`); logs go to stderr.
+AlphaHENG invokes the Rust Index CLI binary directly and supplies its
+runtime environment from the control machine.
 
 ## Tests
 
@@ -118,33 +222,21 @@ All optional. The server works with zero configuration.
 cargo test              # all tests
 cargo test walker       # file discovery
 cargo test splitter     # AST parsing
-cargo test embedding    # embedding client
-cargo test local        # local vector store
+cargo test overview     # structure overview
 cargo test lexical      # BM25 search
 ```
+
+Known flake: `mcp::tools::tests::test_index_codebase_updates_shared_status`
+(mock embedding server under full-suite parallel load) can fail
+intermittently; it passes in isolation. Re-run before investigating.
 
 ## Dependencies
 
 - **Core:** rmcp 1.5.0, tokio, rayon, ignore
-- **Parsing:** tree-sitter + language grammars
-- **HTTP:** reqwest with connection pooling and rustls-tls
 - **Concurrency:** dashmap, parking_lot
+- **Parsing:** tree-sitter + language grammars
+- **HTTP:** reqwest (rustls-tls)
 - **Lexical:** tantivy
-
-## rmcp Usage Patterns
-
-This project uses rmcp 1.5.0 with its built-in stdio transport. Key pattern:
-
-```rust
-use rmcp::transport::io::stdio;
-use rmcp::ServiceExt;
-
-let tools = MyHandler::new();
-let service = tools.serve(stdio()).await?;
-service.waiting().await?;
-```
-
-Tools are defined with `#[tool_router]` and `#[tool]` macros on a `#[derive(Clone)]` struct holding a `ToolRouter<Self>`.
 
 ## Code Quality
 
@@ -158,4 +250,4 @@ Tools are defined with `#[tool_router]` and `#[tool]` macros on a `#[derive(Clon
 - Avoid abstractions until needed 3+ times
 - No backwards compatibility shims — just change the code
 
-**The goal is a fast, minimal MCP server — not a framework.**
+**The goal is a fast, minimal indexing tool — not a framework.**
