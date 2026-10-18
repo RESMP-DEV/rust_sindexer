@@ -45,10 +45,29 @@ pub fn fuse_hybrid_hits(
     );
 
     let mut fused_hits: Vec<HybridHit> = fused.into_values().collect();
-    fused_hits.sort_by(|left, right| right.score.total_cmp(&left.score));
+    sort_fused_hits(&mut fused_hits);
     fused_hits.truncate(options.limit);
     info!(result_count = fused_hits.len(), "hybrid fusion complete");
     fused_hits
+}
+
+/// Order fused hits by score, breaking ties on stable chunk identity.
+///
+/// Ties are real here: chunks that occupy the same rank in both the semantic
+/// and lexical lists score identically. Sorting on score alone left the order
+/// to HashMap iteration order, so the same query returned different rankings on
+/// consecutive runs. A stable tie-break makes ranking reproducible, which is
+/// what any retrieval quality measurement or model comparison requires.
+fn sort_fused_hits(hits: &mut [HybridHit]) {
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.chunk.relative_path.cmp(&right.chunk.relative_path))
+            .then_with(|| left.chunk.start_line.cmp(&right.chunk.start_line))
+            .then_with(|| left.chunk.end_line.cmp(&right.chunk.end_line))
+            .then_with(|| left.chunk.id.cmp(&right.chunk.id))
+    });
 }
 
 fn filter_hits(hits: Vec<HybridHit>, extension_filter: &[String]) -> Vec<HybridHit> {
@@ -203,6 +222,31 @@ mod tests {
         );
 
         assert_eq!(fused.len(), 2);
+    }
+
+    #[test]
+    fn test_sort_fused_hits_breaks_ties_on_chunk_identity() {
+        let mut fused = vec![
+            hit("3", "src/m.rs", "/repo/src/m.rs", 9, 0.5),
+            hit("1", "src/a.rs", "/repo/src/a.rs", 7, 0.5),
+            hit("2", "src/z.rs", "/repo/src/z.rs", 5, 0.9),
+            hit("4", "src/a.rs", "/repo/src/a.rs", 3, 0.5),
+        ];
+
+        super::sort_fused_hits(&mut fused);
+
+        assert_eq!(
+            fused
+                .iter()
+                .map(|hit| (hit.chunk.id.clone(), hit.chunk.start_line))
+                .collect::<Vec<_>>(),
+            vec![
+                ("2".to_string(), 5),
+                ("4".to_string(), 3),
+                ("1".to_string(), 7),
+                ("3".to_string(), 9)
+            ]
+        );
     }
 
     #[test]
