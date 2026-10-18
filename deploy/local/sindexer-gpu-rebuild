@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# Run a full sindexer rebuild through both B550 CUDA embedding replicas.
+
+set -euo pipefail
+
+usage() {
+	cat >&2 <<'EOF'
+Usage: sindexer-gpu-rebuild <repository> [--update]
+
+The default is a full rebuild. --update runs the normal incremental update
+after first proving the dual-GPU B550 endpoint and local Milvus are healthy.
+EOF
+}
+
+PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.orbstack/bin:$PATH"
+EMBED_URL="http://127.0.0.1:1236/health"
+TUNNEL_LABEL="dev.resmp.sindexer-b550-embed-tunnel"
+MILVUS_CONTAINERS="milvus-etcd milvus-minio milvus-standalone"
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+	usage
+	exit 0
+fi
+
+repo=${1:-}
+mode=${2:---force}
+if [ -z "$repo" ] || [ ! -d "$repo" ]; then
+	usage
+	exit 2
+fi
+case "$mode" in
+--update)
+	verb=(update "$repo")
+	;;
+--force)
+	verb=(index "$repo" --force)
+	;;
+*)
+	usage
+	exit 2
+	;;
+esac
+
+ensure_b550() {
+	ssh -o BatchMode=yes -o ConnectTimeout=5 B550 '
+    failed=0
+    for unit in sindexer-embed-gpu@0.service sindexer-embed-gpu@1.service nginx; do
+      if ! systemctl is-active --quiet "$unit"; then
+        sudo systemctl start "$unit" || failed=1
+      fi
+    done
+    exit "$failed"
+  '
+	for _attempt in 1 2 3 4 5; do
+		if curl -fsS --max-time 3 "$EMBED_URL" >/dev/null 2>&1; then
+			return 0
+		fi
+		launchctl kickstart -k "gui/$(id -u)/$TUNNEL_LABEL" >/dev/null 2>&1 || true
+		sleep 2
+	done
+	echo "B550 embedding tunnel failed health check: $EMBED_URL" >&2
+	return 1
+}
+
+b550_ready() {
+	ssh -o BatchMode=yes -o ConnectTimeout=3 B550 'true' >/dev/null 2>&1
+}
+
+wake_b550() {
+	if b550_ready; then
+		return 0
+	fi
+	command -v wakeonlan >/dev/null || {
+		echo "B550 is unreachable and wakeonlan is not installed" >&2
+		return 1
+	}
+	for _attempt in 1 2 3 4 5 6; do
+		wakeonlan -i 192.168.1.255 bc:fc:e7:e9:72:5a >/dev/null 2>&1 || true
+		sleep 5
+		if b550_ready; then
+			return 0
+		fi
+	done
+	echo "B550 did not become reachable after Wake-on-LAN" >&2
+	return 1
+}
+
+start_keepawake() {
+	ssh -o BatchMode=yes -o ConnectTimeout=5 B550 '
+    sudo systemctl stop sindexer-gpu-keepawake.service >/dev/null 2>&1 || true
+    sudo systemd-run --unit=sindexer-gpu-keepawake --collect \
+      /bin/systemd-inhibit --what=sleep --who=sindexer-gpu-rebuild \
+      --why="full semantic index rebuild" /bin/sleep infinity
+  '
+}
+
+stop_keepawake() {
+	ssh -o BatchMode=yes -o ConnectTimeout=5 B550 \
+		'sudo systemctl stop sindexer-gpu-keepawake.service >/dev/null 2>&1 || true'
+}
+
+ensure_milvus() {
+	if ! docker info >/dev/null 2>&1; then
+		orb start
+		sleep 2
+	fi
+	for container in $MILVUS_CONTAINERS; do
+		if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null || true)" != true ]; then
+			docker start "$container" >/dev/null
+		fi
+	done
+	for _attempt in $(seq 1 45); do
+		if [ "$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' milvus-standalone 2>/dev/null || true)" = healthy ]; then
+			return 0
+		fi
+		sleep 2
+	done
+	echo "Milvus did not become healthy" >&2
+	return 1
+}
+
+wake_b550
+ensure_b550
+ensure_milvus
+start_keepawake
+trap stop_keepawake EXIT
+
+# The embedding server is already memory-bound on both GPUs. Keep the input
+# batch large enough to amortize HTTP and Python overhead without making one
+# request so large that nginx/load balancing becomes coarse-grained.
+export BATCH_SIZE="${SINDEXER_BATCH_SIZE:-100}"
+sindexer "${verb[@]}"

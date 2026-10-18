@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+exec /usr/bin/ssh -4 -NT \
+	-o BatchMode=yes \
+	-o ExitOnForwardFailure=yes \
+	-o ServerAliveInterval=15 \
+	-o ServerAliveCountMax=3 \
+	-o ControlMaster=no \
+	-o ControlPath=none \
+	-o ControlPersist=no \
+	-L 127.0.0.1:1236:127.0.0.1:1238 \
+	B550

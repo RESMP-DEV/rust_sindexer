@@ -27,6 +27,14 @@ All notable changes to `rust_sindexer` will be documented in this file.
   that ended the false "degraded" ticks logged since the watchdog's
   creation. Live host files become symlinks to this directory so the repo
   is the single source of truth.
+- `sindexer-gpu-rebuild <repo>` as an explicit dual-GPU full-rebuild command:
+  it checks/starts both B550 embedding replicas and nginx, restores the Mac
+  tunnel when needed, wakes B550 with its known Wake-on-LAN address, holds a
+  transient sleep inhibitor for the indexing call, starts local Milvus when
+  OrbStack is stopped, and runs a force index with a default 100-chunk
+  embedding batch. `--update` applies the same preflight to incremental
+  updates. The doctor now checks the live 1236 B550 tunnel instead of the
+  retired Mac MLX agent on 1235.
 - B550 deployment kit (`deploy/b550`): direct CUDA MXFP4 Jina embeddings,
   remote Milvus persistence, automatic selection of the 3090 Ti with the
   most free VRAM, and a loopback-only SSH tunnel from the Mac. Review

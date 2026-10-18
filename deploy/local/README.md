@@ -17,13 +17,19 @@ repo stays the single source of truth.
   profile enters. It execs `/usr/local/bin/sindexer`, which points at this
   repo's release build.
 - `sindexer-doctor` — health monitor (`~/.local/bin/sindexer-doctor`).
-  Checks the full semantic-search path: wrapper, Jina embedding agent +
-  endpoint dimension/latency, Milvus port + collections + container health,
+  Checks the full semantic-search path: wrapper, persistent B550 CUDA
+  embedding tunnel + endpoint dimension/latency, Milvus port + collections +
+  container health,
   per-repo manifest freshness (7-day warn), LM Studio fallback, B550
   reachability, and volumes disk. Exit 0 healthy / 1 degraded / 2 broken.
   Modes: human report, `--json`, `--watch` (append one JSON line).
   A full cycle takes ~60s (the dead LM Studio port alone eats a 10s curl
   timeout); an in-flight run is not a hang.
+- `sindexer-gpu-rebuild` — explicit full-rebuild entry point. Starts/checks
+  both B550 CUDA replicas and nginx, restores the Mac tunnel if needed,
+  starts the local Milvus containers when OrbStack is stopped, and runs
+  `sindexer index <repo> --force` with a 100-chunk embedding batch. Use
+  `--update` for the same preflight with incremental update semantics.
 - `launchd/com.local.sindexer-doctor.plist` — watchdog agent, one doctor
   `--watch` line every 30 minutes (StartInterval 1800, RunAtLoad) appended
   to `~/Library/Logs/sindexer-doctor.log`, pruned to 2000 lines.
@@ -34,6 +40,7 @@ repo stays the single source of truth.
 repo=$(pwd)   # .../deploy/local
 ln -sf "$repo/sindexer"         ~/.local/bin/sindexer
 ln -sf "$repo/sindexer-doctor"  ~/.local/bin/sindexer-doctor
+ln -sf "$repo/sindexer-gpu-rebuild" ~/.local/bin/sindexer-gpu-rebuild
 ln -sf sindexer                 ~/.local/bin/rust-indexer   # legacy alias
 cp "$repo/launchd/com.local.sindexer-doctor.plist" ~/Library/LaunchAgents/
 launchctl bootout gui/$(id -u)/com.local.sindexer-doctor 2>/dev/null
@@ -51,10 +58,9 @@ after editing it.
   for a different user or machine before install. The doctor's REPOS list
   is `$HOME`-relative but describes this fleet's layout; adjust it for a
   different checkout topology.
-- Both scripts pin `#!/bin/bash` (macOS system bash 3.2): it is the one
-  interpreter guaranteed to exist in LaunchAgent and cron contexts, where
-  Homebrew's tree is not on PATH. Keep them 3.2-clean (no associative
-  arrays, `mapfile`, or `${var,,}`).
+- Local scripts use `#!/usr/bin/env bash`, explicitly restore PATH for
+  sanitized LaunchAgent/cron contexts, and remain Bash 3.2-compatible (no
+  associative arrays, `mapfile`, or `${var,,}`).
 - The doctor self-augments PATH (Homebrew, `/usr/local/bin`, OrbStack) at
   the top: launchd's default PATH lacks `timeout` (coreutils) and `docker`
   (OrbStack), which otherwise silently degrades the collections and

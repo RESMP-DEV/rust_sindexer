@@ -1,12 +1,14 @@
 # B550 embedding and vector services
 
-This deployment keeps repository walking, Tantivy, Git authority, and task
-state on the Mac. B550 hosts the exact pinned Jina Code MXFP4 embedding model
-and the Milvus/MinIO/etcd vector stack. All B550 ports bind to loopback and the
-Mac reaches them through the persistent SSH tunnel.
+This deployment keeps repository walking, Tantivy, Git authority, Milvus, and
+task state on the Mac. B550 hosts the exact pinned Jina Code MXFP4 embedding
+model on both RTX 3090 Ti GPUs. All B550 ports bind to loopback and the Mac
+reaches the balanced embedding endpoint through the persistent SSH tunnel.
 
-The embedding launcher probes every working RTX 3090 Ti and selects the card
-with the most free VRAM. The model revision is
+Two complete embedding replicas run on the two RTX 3090 Ti GPUs. nginx uses
+least-connections balancing over loopback ports 1236 and 1237, and the Mac
+tunnel exposes that balanced endpoint locally as port 1236. The model
+revision is
 `a328a7f269e0cc7eb7eaf977225f698940aa7d25`; its `model.safetensors` SHA-256 is
 `9cadd568e6757e15358d960e4688bb0792a7edcd9889ef3d37f2361f4db6b756`.
 
@@ -21,8 +23,10 @@ embedding service to 48 GiB so a failed warm-up cannot exhaust the host.
 - Service root: `/home/kearm/services/rust-indexer`
 - Model: `models/jina-code-mxfp4-a328a7f`
 - Server sources: `runtime/`
-- Vector stack and data: `milvus/`
-- Mac tunnel: `~/Library/LaunchAgents/dev.resmp.rust-indexer-b550-tunnel.plist`
+- GPU systemd template: `systemd/sindexer-embed-gpu@.service`
+- nginx upstream: `nginx/sindexer-jina-upstream.conf`
+- Mac tunnel: `launchd/dev.resmp.sindexer-b550-embed-tunnel.plist` plus
+  `launchd/sindexer-b550-embed-tunnel`
 
 ## Credentials
 
@@ -44,3 +48,11 @@ The move is complete only when:
 4. A real `rust-indexer search` returns semantic and lexical hits through the
    loopback tunnel.
 5. Both B550 services and the Mac tunnel recover after controlled restarts.
+6. During a full rebuild, both GPU utilization readings rise and both systemd
+   instance journals receive `/v1/embeddings` requests; port 1236 alone is
+   not proof of dual-GPU operation.
+
+The older `rust-indexer-embedding.service`, `rust-indexer-milvus.service`,
+and `dev.resmp.rust-indexer-b550-tunnel.plist` files remain historical
+recovery references; the active endpoint is the dual-GPU template, nginx
+upstream, and `dev.resmp.sindexer-b550-embed-tunnel` described above.
