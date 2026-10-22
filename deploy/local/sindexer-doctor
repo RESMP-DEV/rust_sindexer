@@ -167,7 +167,11 @@ if [[ "$lms_dim" =~ ^[0-9]+$ ]]; then lms_ok=true; else
 	lms_dim=null
 fi
 j_lms="\"dimension\":$lms_dim,\"ok\":$lms_ok"
-if nc -z -w 2 strix-zt 22 2>/dev/null; then j_strix='"reachable":true'; else j_strix='"reachable":false'; fi
+if ssh -o BatchMode=yes -o ConnectTimeout=3 strix-zt true >/dev/null 2>&1; then
+	j_strix='"reachable":true'
+else
+	j_strix='"reachable":false'
+fi
 j_disk=$(du -sm "$HOME/milvus/volumes" 2>/dev/null | awk '{print $1}')
 [ -n "$j_disk" ] || j_disk=0
 
