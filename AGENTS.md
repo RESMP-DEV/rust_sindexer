@@ -100,10 +100,10 @@ ordered; verify each before moving on.
    sindexer-doctor --json         # exit 0 = healthy; ~60s cycle is normal
    ```
 
-**GPU host role:** `deploy/b550/` is the Linux compute-machine variant —
-local CUDA Jina embeddings (3090 Ti selection), remote Milvus reached over a
-loopback-only SSH tunnel. Start there, not here, when provisioning the
-second tier.
+**GPU host role:** `deploy/strix/` is the Linux compute-machine variant —
+one pinned CUDA Jina embedding service on the Strix RTX 5070, reached over a
+loopback-only SSH tunnel through `strix-zt`. Milvus and authoritative source
+state stay local. Start there, not here, when repairing the second tier.
 
 ## Agent operating contract
 
@@ -206,7 +206,7 @@ changed files only and refuses full-rebuild fallback; `force: true` on
 - `src/usage.rs` — usage telemetry (JSONL log + `usage` verb)
 - `src/vectordb/local.rs`, `src/vectordb/client.rs` — vector stores
 - `deploy/local/` — PATH wrapper, doctor, watchdog LaunchAgent
-- `deploy/b550/` — Linux GPU-host deployment kit
+- `deploy/strix/` — Strix RTX 5070 GPU-host deployment kit
 
 ## MCP Tools
 

@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# Run a sindexer rebuild through the Strix CUDA embedding service.
+
+set -euo pipefail
+
+usage() {
+	cat >&2 <<'EOF'
+Usage: sindexer-strix-rebuild <repository> [--update]
+
+The default is a full rebuild. --update runs the normal incremental update
+after first proving the Strix RTX 5070 endpoint and local Milvus are healthy.
+EOF
+}
+
+PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.orbstack/bin:$PATH"
+EMBED_URL="http://127.0.0.1:1236/health"
+TUNNEL_LABEL="dev.resmp.sindexer-strix-embed-tunnel"
+MILVUS_CONTAINERS="milvus-etcd milvus-minio milvus-standalone"
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+	usage
+	exit 0
+fi
+
+repo=${1:-}
+mode=${2:---force}
+if [ -z "$repo" ] || [ ! -d "$repo" ]; then
+	usage
+	exit 2
+fi
+case "$mode" in
+--update)
+	verb=(update "$repo")
+	;;
+--force)
+	verb=(index "$repo" --force)
+	;;
+*)
+	usage
+	exit 2
+	;;
+esac
+
+ensure_strix() {
+	ssh -o BatchMode=yes -o ConnectTimeout=5 strix-zt \
+		'systemctl is-active --quiet sindexer-embed-gpu.service ||
+		 sudo systemctl start sindexer-embed-gpu.service'
+
+	local health model dimensions runtime device
+	for _attempt in 1 2 3 4 5; do
+		health=$(curl -fsS --max-time 5 "$EMBED_URL" 2>/dev/null || true)
+		model=$(printf '%s' "$health" | jq -r '.model // ""' 2>/dev/null)
+		dimensions=$(printf '%s' "$health" | jq -r '.dimensions // 0' 2>/dev/null)
+		runtime=$(printf '%s' "$health" | jq -r '.runtime // ""' 2>/dev/null)
+		device=$(printf '%s' "$health" | jq -r '.device // ""' 2>/dev/null)
+		if [ "$model" = "jina-code-embeddings-1.5b-block-gptq-mxfp4-32k" ] &&
+			[ "$dimensions" = "1536" ] &&
+			[ "$runtime" = "cuda-mxfp4" ] &&
+			[ "$device" = "NVIDIA GeForce RTX 5070 Laptop GPU" ]; then
+			return 0
+		fi
+		launchctl kickstart -k "gui/$(id -u)/$TUNNEL_LABEL" >/dev/null 2>&1 || true
+		sleep 2
+	done
+
+	echo "Strix embedding tunnel failed its identity health check: $EMBED_URL" >&2
+	return 1
+}
+
+ensure_milvus() {
+	if ! docker info >/dev/null 2>&1; then
+		orb start
+		sleep 2
+	fi
+	for container in $MILVUS_CONTAINERS; do
+		if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null || true)" != true ]; then
+			docker start "$container" >/dev/null
+		fi
+	done
+	for _attempt in $(seq 1 45); do
+		if [ "$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' milvus-standalone 2>/dev/null || true)" = healthy ]; then
+			return 0
+		fi
+		sleep 2
+	done
+	echo "Milvus did not become healthy" >&2
+	return 1
+}
+
+start_keepawake() {
+	ssh -o BatchMode=yes -o ConnectTimeout=5 strix-zt '
+    sudo systemctl stop sindexer-strix-keepawake.service >/dev/null 2>&1 || true
+    sudo systemd-run --unit=sindexer-strix-keepawake --collect \
+      /bin/systemd-inhibit --what=sleep --who=sindexer-strix-rebuild \
+      --why="semantic index rebuild" /bin/sleep infinity
+  '
+}
+
+stop_keepawake() {
+	ssh -o BatchMode=yes -o ConnectTimeout=5 strix-zt \
+		'sudo systemctl stop sindexer-strix-keepawake.service >/dev/null 2>&1 || true'
+}
+
+ensure_strix
+ensure_milvus
+start_keepawake
+trap stop_keepawake EXIT INT TERM
+
+# The RTX 5070 has 8 GiB of unified GPU memory. Keep requests large enough to
+# amortize HTTP overhead without making one batch dominate resident memory.
+export BATCH_SIZE="${SINDEXER_BATCH_SIZE:-32}"
+sindexer "${verb[@]}"

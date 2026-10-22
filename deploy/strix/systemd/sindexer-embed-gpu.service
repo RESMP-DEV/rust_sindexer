@@ -1,5 +1,5 @@
 [Unit]
-Description=S-indexer Jina CUDA MXFP4 embedding service (GPU %i)
+Description=S-indexer Jina CUDA MXFP4 embedding service (Strix RTX 5070)
 After=network-online.target
 Wants=network-online.target
 
@@ -10,17 +10,16 @@ Group=kearm
 WorkingDirectory=/home/kearm/services/rust-indexer/runtime
 Environment=PYTHONPATH=/home/kearm/services/rust-indexer/runtime
 Environment=JINA_CODE_MODEL_PATH=/home/kearm/services/rust-indexer/models/jina-code-mxfp4-a328a7f
-Environment=CUDA_VISIBLE_DEVICES=%i
+Environment=CUDA_VISIBLE_DEVICES=0
 Environment=HF_HOME=/home/kearm/.cache/huggingface
 Environment=TORCHINDUCTOR_CACHE_DIR=/home/kearm/.cache/torchinductor/rust-indexer
 Environment=TRITON_CACHE_DIR=/home/kearm/.cache/triton/rust-indexer
-ExecStartPre=/bin/sh -c 'test -f /home/kearm/services/rust-indexer/models/jina-code-mxfp4-a328a7f/model.safetensors'
-# The instance number selects both the CUDA device and loopback port.
-ExecStart=/bin/sh -c 'exec /home/kearm/services/rust-indexer/.venv/bin/python -m uvicorn cuda_embed_server:app --host 127.0.0.1 --port 123$((6+%i))'
+ExecStartPre=/bin/sh -c "test -f /home/kearm/services/rust-indexer/models/jina-code-mxfp4-a328a7f/model.safetensors"
+ExecStart=/home/kearm/.probe-mxfp4-sm120/bin/python -m uvicorn cuda_embed_server:app --host 127.0.0.1 --port 1236
 Restart=on-failure
 RestartSec=10
-MemoryHigh=20G
-MemoryMax=24G
+MemoryHigh=12G
+MemoryMax=16G
 
 [Install]
 WantedBy=multi-user.target

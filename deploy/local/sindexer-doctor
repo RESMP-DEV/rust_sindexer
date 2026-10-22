@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # sindexer-doctor — health monitor for the local Rust-indexer stack.
 #
-# Checks the full semantic-search path: wrapper -> B550 embedding tunnel
+# Checks the full semantic-search path: wrapper -> Strix embedding tunnel
 # (1236 via LaunchAgent) -> Milvus (19530, ~/milvus docker-compose), plus
 # index freshness for the indexed project fleet. LM Studio (1234, nomic) and
-# B550 reachability are informational fallback/context checks.
+# Strix reachability are informational fallback/context checks.
 #
 # Usage:
 #   sindexer-doctor            human-readable report
@@ -24,8 +24,9 @@ PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.orbstack/bin:$PATH"
 # Bash 3.2 compatible (no associative arrays).
 set -u
 
-EMBED_AGENT="dev.resmp.sindexer-b550-embed-tunnel"
+EMBED_AGENT="dev.resmp.sindexer-strix-embed-tunnel"
 EMBED_URL="http://127.0.0.1:1236/v1"
+EMBED_HEALTH_URL="http://127.0.0.1:1236/health"
 LMS_URL="http://127.0.0.1:1234/v1"
 EXPECTED_DIM=1536
 LOG="$HOME/Library/Logs/sindexer-doctor.log"
@@ -81,9 +82,9 @@ else
 fi
 
 #
-# The endpoint probe is authoritative: a live SSH listener without a healthy
-# B550 nginx response is not an embedding service.
-# --- embedding tunnel (1236 -> B550 nginx) ---------------------------------
+# The endpoint probes are authoritative: a live SSH listener without the pinned
+# Strix CUDA model is not the embedding service.
+# --- embedding tunnel (1236 -> Strix CUDA service) -------------------------
 agent_state=$(launchctl list 2>/dev/null | awk -v a="$EMBED_AGENT" '$3==a {print $1}')
 if [ "$agent_state" != "" ] && [ "$agent_state" != "-" ]; then
 	if [[ "$agent_state" =~ ^[0-9]+$ ]]; then
@@ -99,14 +100,22 @@ fi
 dim_ms=$(probe_dim "$EMBED_URL")
 dim=${dim_ms%% *}
 ms=${dim_ms##* }
+embed_health=$(curl -fsS --max-time 5 "$EMBED_HEALTH_URL" 2>/dev/null || true)
+embed_model=$(printf '%s' "$embed_health" | jq -r '.model // ""' 2>/dev/null)
+embed_runtime=$(printf '%s' "$embed_health" | jq -r '.runtime // ""' 2>/dev/null)
+embed_device=$(printf '%s' "$embed_health" | jq -r '.device // ""' 2>/dev/null)
 if [ "$dim" = "error" ]; then
 	j_embedding_endpoint='"ok":false,"detail":"no response on 1236"'
 	bad
 elif [ "$dim" != "$EXPECTED_DIM" ]; then
 	j_embedding_endpoint="\"ok\":false,\"dimension\":$dim,\"detail\":\"expected $EXPECTED_DIM\""
 	bad
+elif [ "$embed_runtime" != "cuda-mxfp4" ] ||
+	[ "$embed_device" != "NVIDIA GeForce RTX 5070 Laptop GPU" ]; then
+	j_embedding_endpoint="\"ok\":false,\"host\":\"strix\",\"runtime\":\"$embed_runtime\",\"device\":\"$embed_device\""
+	bad
 else
-	j_embedding_endpoint="\"ok\":true,\"dimension\":$dim,\"latency_ms\":$ms"
+	j_embedding_endpoint="\"ok\":true,\"host\":\"strix\",\"dimension\":$dim,\"latency_ms\":$ms,\"model\":\"$embed_model\",\"runtime\":\"$embed_runtime\",\"device\":\"$embed_device\""
 fi
 
 # --- milvus (19530) ---------------------------------------------------------
@@ -151,14 +160,14 @@ done
 fresh_json=${fresh_json%,}
 j_fresh="\"warn_days\":$FRESH_WARN_DAYS,\"stale\":$stale,\"missing_manifest\":$missing,\"repos\":[$fresh_json]"
 
-# --- informational: LM Studio fallback + B550 -------------------------------
+# --- informational: LM Studio fallback + Strix -------------------------------
 lms_dim=$(probe_dim "$LMS_URL" | cut -d' ' -f1)
 if [[ "$lms_dim" =~ ^[0-9]+$ ]]; then lms_ok=true; else
 	lms_ok=false
 	lms_dim=null
 fi
 j_lms="\"dimension\":$lms_dim,\"ok\":$lms_ok"
-if nc -z -w 2 192.168.1.171 22 2>/dev/null; then j_b550='"reachable":true'; else j_b550='"reachable":false'; fi
+if nc -z -w 2 strix-zt 22 2>/dev/null; then j_strix='"reachable":true'; else j_strix='"reachable":false'; fi
 j_disk=$(du -sm "$HOME/milvus/volumes" 2>/dev/null | awk '{print $1}')
 [ -n "$j_disk" ] || j_disk=0
 
@@ -170,8 +179,8 @@ case "$STATUS" in
 esac
 
 json() {
-	printf '{"ts":%s,"status":"%s","wrapper":{%s},"embedding_agent":{%s},"embedding_endpoint":{%s},"milvus":{%s},"milvus_container":{%s},"freshness":{%s},"lmstudio_fallback":{%s},"b550":{%s},"milvus_disk_mb":%s}\n' \
-		"$now" "$status_word" "$j_wrapper" "$j_embedding_agent" "$j_embedding_endpoint" "$j_milvus" "$j_container" "$j_fresh" "$j_lms" "$j_b550" "$j_disk"
+	printf '{"ts":%s,"status":"%s","wrapper":{%s},"embedding_agent":{%s},"embedding_endpoint":{%s},"milvus":{%s},"milvus_container":{%s},"freshness":{%s},"lmstudio_fallback":{%s},"strix":{%s},"milvus_disk_mb":%s}\n' \
+		"$now" "$status_word" "$j_wrapper" "$j_embedding_agent" "$j_embedding_endpoint" "$j_milvus" "$j_container" "$j_fresh" "$j_lms" "$j_strix" "$j_disk"
 }
 
 case "${1:-}" in
@@ -187,11 +196,11 @@ case "${1:-}" in
       "status:        \(.status)",
       "wrapper:       \(.wrapper.ok // false)",
       "embed agent:   \(.embedding_agent.running) pid=\(.embedding_agent.pid // "-")",
-      "embed 1236:    \(.embedding_endpoint.ok // false) dim=\(.embedding_endpoint.dimension // "-") latency=\(.embedding_endpoint.latency_ms // "-")ms",
+      "embed 1236:    \(.embedding_endpoint.ok // false) host=\(.embedding_endpoint.host // "-") dim=\(.embedding_endpoint.dimension // "-") latency=\(.embedding_endpoint.latency_ms // "-")ms",
       "milvus:        \(.milvus.ok // false) collections=\(.milvus.n // "-") rows=\(.milvus.rows // "-") container=\(.milvus_container.state // "-")",
       "freshness:     stale=\(.freshness.stale) missing=\(.freshness.missing_manifest) (warn \( .freshness.warn_days)d) oldest=\([.freshness.repos[] | select(.age_days != null) | .age_days] | max // 0)d",
       "lmstudio 1234: dim=\(.lmstudio_fallback.dimension) (fallback)",
-      "b550:          reachable=\(.b550.reachable)",
+      "strix:         reachable=\(.strix.reachable)",
       "milvus disk:   \(.milvus_disk_mb)MB"'
 	;;
 esac

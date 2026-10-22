@@ -3,10 +3,10 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>dev.resmp.sindexer-b550-embed-tunnel</string>
+  <string>dev.resmp.sindexer-strix-embed-tunnel</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/kearm/.local/bin/sindexer-b550-embed-tunnel</string>
+    <string>/Users/kearm/.local/bin/sindexer-strix-embed-tunnel</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -14,9 +14,9 @@
   <true/>
   <key>ThrottleInterval</key>
   <integer>10</integer>
-  <key>StandardOutPath</key>
-  <string>/Users/kearm/Library/Logs/sindexer-b550-embed-tunnel.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/kearm/Library/Logs/sindexer-b550-embed-tunnel.err</string>
+  <string>/Users/kearm/Library/Logs/sindexer-strix-embed-tunnel.err</string>
+  <key>StandardOutPath</key>
+  <string>/Users/kearm/Library/Logs/sindexer-strix-embed-tunnel.log</string>
 </dict>
 </plist>
