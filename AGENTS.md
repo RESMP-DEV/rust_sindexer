@@ -41,7 +41,6 @@ ordered; verify each before moving on.
 
    ```bash
    cargo build --release
-   sudo ln -sf "$PWD/target/release/sindexer" /usr/local/bin/sindexer
    ```
 
 3. **Provision `~/.context/.env`** (never committed; the repo holds no
@@ -75,12 +74,12 @@ ordered; verify each before moving on.
    `com.local.sindexer-doctor` LaunchAgent (one `--watch` line every 30
    minutes to `~/Library/Logs/sindexer-doctor.log`). The wrapper sources
    `~/.context/.env` with caller-env-wins semantics and execs
-   `/usr/local/bin/sindexer`.
+   `$HOME/rust_sindexer/target/release/sindexer`.
 
 5. **MCP clients (optional).** With no arguments the binary speaks
    newline-delimited JSON-RPC on stdio. Point clients at the **wrapper**
    (`~/.local/bin/sindexer`), not the raw binary: the wrapper is the only
-   place `~/.context/.env` enters, so exec-ing `/usr/local/bin/sindexer`
+   place `~/.context/.env` enters, so exec-ing the release binary directly
    directly silently runs lexical-only at the 384-dim local default. JSON
    configs cannot expand `~`, so write the absolute path for your user:
 

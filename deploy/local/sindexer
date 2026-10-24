@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Uniform entry for the Rust indexing CLI (sindexer / rust-indexer).
 #
 # Sources the shared profile from ~/.context/.env so every caller — shell
@@ -7,7 +7,7 @@
 # profile variable already exported is snapshot-restored after sourcing.
 # The binary itself reads only process env; it does not parse the .env file.
 env_file="$HOME/.context/.env"
-bin=/usr/local/bin/sindexer
+bin="$HOME/rust_sindexer/target/release/sindexer"
 if [ -r "$env_file" ]; then
   saved=$(mktemp)
   trap 'rm -f "$saved"' EXIT

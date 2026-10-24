@@ -109,7 +109,7 @@ stdin/stdout launched by an MCP client; with a verb it is a normal CLI (see
 **Claude Code** (user scope, available in all projects):
 
 ```bash
-claude mcp add code-indexer --scope user -- /usr/local/bin/sindexer
+claude mcp add code-indexer --scope user -- /Users/kearm/.local/bin/sindexer
 ```
 
 **Any client that reads an `mcpServers` block** (project-level `.mcp.json`,
@@ -120,7 +120,7 @@ claude mcp add code-indexer --scope user -- /usr/local/bin/sindexer
   "mcpServers": {
     "code-indexer": {
       "type": "stdio",
-      "command": "/usr/local/bin/sindexer",
+      "command": "/Users/kearm/.local/bin/sindexer",
       "args": []
     }
   }
