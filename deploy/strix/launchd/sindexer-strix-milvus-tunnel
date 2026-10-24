@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Vector-store lane for the Rust indexer: forwards the Mac's localhost:19530
+# to the Milvus standalone running on Strix (127.0.0.1:19530 in
+# /home/kearm/sindexer-stack). Companion to sindexer-strix-embed-tunnel.
+exec /usr/bin/ssh -4 -NT \
+	-o BatchMode=yes \
+	-o ExitOnForwardFailure=yes \
+	-o ServerAliveInterval=15 \
+	-o ServerAliveCountMax=3 \
+	-o ControlMaster=no \
+	-o ControlPath=none \
+	-o ControlPersist=no \
+	-L 127.0.0.1:19530:127.0.0.1:19530 \
+	strix-zt

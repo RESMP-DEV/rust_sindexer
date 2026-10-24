@@ -8,14 +8,15 @@ usage() {
 Usage: sindexer-strix-rebuild <repository> [--update]
 
 The default is a full rebuild. --update runs the normal incremental update
-after first proving the Strix RTX 5070 endpoint and local Milvus are healthy.
+after first proving the Strix RTX 5070 endpoint and the Strix Milvus tunnel
+are healthy.
 EOF
 }
 
 PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.orbstack/bin:$PATH"
 EMBED_URL="http://127.0.0.1:1236/health"
 TUNNEL_LABEL="dev.resmp.sindexer-strix-embed-tunnel"
-MILVUS_CONTAINERS="milvus-etcd milvus-minio milvus-standalone"
+MILVUS_TUNNEL_LABEL="dev.resmp.sindexer-strix-milvus-tunnel"
 
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
 	usage
@@ -68,23 +69,15 @@ ensure_strix() {
 }
 
 ensure_milvus() {
-	if ! docker info >/dev/null 2>&1; then
-		orb start
-		sleep 2
+	if ! nc -z -w 2 127.0.0.1 19530 2>/dev/null; then
+		launchctl kickstart -k "gui/$(id -u)/$MILVUS_TUNNEL_LABEL" >/dev/null 2>&1 || true
+		for _attempt in $(seq 1 15); do
+			nc -z -w 2 127.0.0.1 19530 2>/dev/null && return 0
+			sleep 2
+		done
+		echo "Milvus tunnel (19530 via Strix) did not come up" >&2
+		return 1
 	fi
-	for container in $MILVUS_CONTAINERS; do
-		if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null || true)" != true ]; then
-			docker start "$container" >/dev/null
-		fi
-	done
-	for _attempt in $(seq 1 45); do
-		if [ "$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' milvus-standalone 2>/dev/null || true)" = healthy ]; then
-			return 0
-		fi
-		sleep 2
-	done
-	echo "Milvus did not become healthy" >&2
-	return 1
 }
 
 start_keepawake() {

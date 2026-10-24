@@ -14,23 +14,23 @@ repo stays the single source of truth.
   agents, and cron all get the same embedding endpoint and vector backend;
   variables already exported by the caller win over the profile. The binary
   itself reads only process env, so the wrapper is the only place the
-  profile enters. It execs `/usr/local/bin/sindexer`, which points at this
-  repo's release build.
+  profile enters. It execs this repo's `target/release/sindexer` directly.
 - `sindexer-doctor` — health monitor (`~/.local/bin/sindexer-doctor`).
   Checks the full semantic-search path: wrapper, persistent Strix CUDA
   embedding tunnel + endpoint model/runtime/device/dimension, Milvus port +
-  collections + container health, per-repo manifest freshness (7-day warn),
-  LM Studio fallback, Strix reachability, and volumes disk. Exit 0 healthy /
-  1 degraded / 2 broken.
+  collections + milvus tunnel agent state (the vector store itself runs on
+  Strix since 2026-10-24), per-repo manifest freshness (7-day warn),
+  LM Studio fallback, Strix reachability, and local cold-backup disk. Exit
+  0 healthy / 1 degraded / 2 broken.
   Modes: human report, `--json`, `--watch` (append one JSON line).
   A full cycle takes ~60s (the dead LM Studio port alone eats a 10s curl
   timeout); an in-flight run is not a hang.
 - `sindexer-strix-rebuild` — explicit full-rebuild entry point. Starts/checks
-  the Strix RTX 5070 CUDA service, restores the Mac tunnel if needed, starts
-  the local Milvus containers when OrbStack is stopped, holds a transient
-  Strix sleep inhibitor, and runs `sindexer index <repo> --force` with a
-  32-chunk embedding batch. Use `--update` for the same preflight with
-  incremental update semantics.
+  the Strix RTX 5070 CUDA service, restores the embedding tunnel if needed,
+  restores the Strix Milvus tunnel when its port is closed, holds a
+  transient Strix sleep inhibitor, and runs `sindexer index <repo> --force`
+  with a 32-chunk embedding batch. Use `--update` for the same preflight
+  with incremental update semantics.
 - `launchd/com.local.sindexer-doctor.plist` — watchdog agent, one doctor
   `--watch` line every 30 minutes (StartInterval 1800, RunAtLoad) appended
   to `~/Library/Logs/sindexer-doctor.log`, pruned to 2000 lines.
@@ -63,8 +63,8 @@ after editing it.
   sanitized LaunchAgent/cron contexts, and remain Bash 3.2-compatible (no
   associative arrays, `mapfile`, or `${var,,}`).
 - The doctor self-augments PATH (Homebrew, `/usr/local/bin`, OrbStack) at
-  the top: launchd's default PATH lacks `timeout` (coreutils) and `docker`
-  (OrbStack), which otherwise silently degrades the collections and
-  container checks into false "degraded" ticks.
+  the top: launchd's default PATH lacks `timeout` (coreutils) and Homebrew
+  tools, which otherwise silently degrades the endpoint and collections
+  checks into false "degraded" ticks.
 - The doctor's REPOS list is the monitored fleet; extend it there when new
   repos are indexed.

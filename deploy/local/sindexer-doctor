@@ -2,7 +2,8 @@
 # sindexer-doctor — health monitor for the local Rust-indexer stack.
 #
 # Checks the full semantic-search path: wrapper -> Strix embedding tunnel
-# (1236 via LaunchAgent) -> Milvus (19530, ~/milvus docker-compose), plus
+# (1236 via LaunchAgent) -> Strix Milvus (19530 via the milvus tunnel
+# LaunchAgent; the local ~/milvus stack is a retired cold backup), plus
 # index freshness for the indexed project fleet. LM Studio (1234, nomic) and
 # Strix reachability are informational fallback/context checks.
 #
@@ -25,6 +26,7 @@ PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.orbstack/bin:$PATH"
 set -u
 
 EMBED_AGENT="dev.resmp.sindexer-strix-embed-tunnel"
+MILVUS_AGENT="dev.resmp.sindexer-strix-milvus-tunnel"
 EMBED_URL="http://127.0.0.1:1236/v1"
 EMBED_HEALTH_URL="http://127.0.0.1:1236/health"
 LMS_URL="http://127.0.0.1:1234/v1"
@@ -130,9 +132,13 @@ if nc -z -w 2 127.0.0.1 19530 2>/dev/null; then
 		j_milvus='"ok":true,"port":true,"detail":"collections query failed"'
 		warn
 	fi
-	dstate=$(docker inspect --format '{{.State.Health.Status}}' milvus-standalone 2>/dev/null)
-	j_container="\"state\":\"${dstate:-unknown}\""
-	if [ "$dstate" != "healthy" ]; then warn; fi
+	mstate=$(launchctl list 2>/dev/null | awk -v a="$MILVUS_AGENT" '$3==a {print $1}')
+	if [ -n "$mstate" ] && [ "$mstate" != "-" ]; then
+		j_container="\"state\":\"tunnel-up\",\"pid\":$mstate"
+	else
+		j_container="\"state\":\"tunnel-down\""
+		warn
+	fi
 else
 	j_milvus='"ok":false,"detail":"port 19530 closed"'
 	j_container='"state":"down"'
