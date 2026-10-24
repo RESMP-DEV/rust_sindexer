@@ -88,13 +88,13 @@ All notable changes to `rust_sindexer` will be documented in this file.
   Milvus implements `upsert` as delete plus insert, so the prior writer created
   one tombstone per inserted row, including during full rebuilds. Lost-response
   retries still switch to upsert to avoid duplicate primary keys.
-- Incremental updates skip re-embedding chunks whose stable IDs were recorded
-  for the same file and remain unchanged.
-- Incremental Milvus updates now record chunk IDs per file and delete only
-  primary keys that disappeared. Previously every modified file was deleted by
-  `relative_path` filter before all of its chunks were upserted again, doubling
+- Incremental Milvus updates now record chunk IDs per file, delete primary keys
+  that disappeared, and upsert only rows whose IDs already existed in a
+  rewritten file. Previously every modified file was deleted by
+  `relative_path` filter before all of its chunks were inserted again, doubling
   tombstone volume and driving recurring compaction work. Manifests without
-  chunk IDs retain the old whole-file fallback for correctness.
+  chunk IDs retain the old whole-file fallback for correctness, and local
+  vector deletes use the same hashed primary-key representation as inserts.
 - The local-embedding probe uses a 1-second connect timeout and parses the
   first JSON value from the response, so chunked transfer encoding no longer
   silently disables the auto-default embedding endpoint.

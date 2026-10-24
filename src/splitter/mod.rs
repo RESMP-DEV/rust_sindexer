@@ -271,6 +271,7 @@ fn split_markdown_chunks(
             let line_count = chunk.end_line - chunk.start_line;
             chunk.start_line = start_line + chunk.start_line - 1;
             chunk.end_line = (chunk.start_line + line_count).min(*end_line);
+            chunk.id = fallback_chunk_id(relative_path, chunk.start_line, &chunk.content);
         }
         chunks.extend(section_chunks);
     }
@@ -347,6 +348,7 @@ fn split_by_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -424,6 +426,24 @@ fn goodbye() {
         assert!(chunks[0].content.starts_with("# Title"));
         assert!(chunks[1].content.starts_with("## Section A"));
         assert!(chunks[2].content.starts_with("## Section B"));
+    }
+
+    #[test]
+    fn markdown_section_chunk_ids_use_whole_file_lines() {
+        let source = "# A\nsame\nsame\n# B\nsame\nsame\n";
+        let mut temp = NamedTempFile::with_suffix(".md").unwrap();
+        temp.write_all(source.as_bytes()).unwrap();
+
+        let splitter = CodeSplitter::new(Config {
+            min_chunk_lines: 1,
+            target_chunk_lines: 1,
+            overlap_lines: 0,
+            ..Config::default()
+        });
+        let chunks = splitter.split_file(temp.path()).unwrap();
+        let ids: BTreeSet<_> = chunks.iter().map(|chunk| chunk.id.as_str()).collect();
+
+        assert_eq!(ids.len(), chunks.len(), "chunk IDs must be globally unique");
     }
 
     #[test]

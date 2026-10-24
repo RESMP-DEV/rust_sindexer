@@ -395,6 +395,21 @@ async fn run_index_codebase(
     }
 
     if files_to_index.is_empty() {
+        let indexed_relative_paths = BTreeSet::new();
+        if embeddings_enabled && !full_reindex {
+            if let Err(e) = delete_stale_vectors(
+                state,
+                &collection_name,
+                &stale_relative_paths,
+                &previous_chunk_ids,
+                &BTreeMap::new(),
+            )
+            .await
+            {
+                update_status_failed(state, path).await;
+                return Err(e);
+            }
+        }
         if let Err(e) = write_manifest(
             state,
             path,
@@ -402,6 +417,7 @@ async fn run_index_codebase(
                 collection_name: &collection_name,
                 index_inputs: &index_inputs,
                 files: &files,
+                indexed_relative_paths: &indexed_relative_paths,
                 cached_fingerprints: cached_fingerprints.take(),
                 current_chunk_ids_by_path: &BTreeMap::new(),
                 previous_chunk_ids: &previous_chunk_ids,
@@ -489,32 +505,10 @@ async fn run_index_codebase(
 
     let total_chunks = all_chunks.len();
     let current_chunk_ids_by_path = chunk_ids_by_path(&all_chunks);
-
-    // Skip chunks whose stable ID already survived the previous run. Their
-    // vectors are unchanged, so re-embedding them costs provider tokens and
-    // server CPU and rewrites rows that do not need rewriting. The decision is
-    // made per file so a chunk ID is only reused for the same file, and files
-    // that this run is rewriting are excluded so their rows get refreshed.
-    if embeddings_enabled && !full_reindex {
-        let unchanged: BTreeSet<String> = unchanged_chunk_ids(
-            &previous_chunk_ids,
-            &current_chunk_ids_by_path,
-            &stale_relative_paths,
-        );
-        let before = all_chunks.len();
-        all_chunks.retain(|chunk| !unchanged.contains(&chunk.id));
-        let skipped = before - all_chunks.len();
-        if skipped > 0 {
-            info!(
-                collection = %collection_name,
-                skipped_chunks = skipped,
-                "skipped chunks whose vectors are already current"
-            );
-            warnings.push(format!(
-                "skipped {skipped} unchanged chunks that were already indexed"
-            ));
-        }
-    }
+    let indexed_relative_paths = files_to_index
+        .iter()
+        .map(|file_path| relative_path(path, file_path))
+        .collect::<BTreeSet<_>>();
 
     if embeddings_enabled && !full_reindex {
         if let Err(e) = delete_stale_vectors(
@@ -554,6 +548,18 @@ async fn run_index_codebase(
         Ok(())
     });
 
+    let existing_row_ids: Arc<BTreeSet<i64>> = if embeddings_enabled && !full_reindex {
+        Arc::new(
+            stale_relative_paths
+                .iter()
+                .filter_map(|relative_path| previous_chunk_ids.get(relative_path))
+                .flat_map(|ids| ids.iter().map(|id| milvus_id_for_chunk_id(id.as_str())))
+                .collect(),
+        )
+    } else {
+        Arc::new(BTreeSet::new())
+    };
+
     let split_warnings = warnings.clone();
     let embedding_handle = async {
         if total_chunks == 0 || !embeddings_enabled {
@@ -582,6 +588,7 @@ async fn run_index_codebase(
             let emb = embedder.clone();
             let vs = vector_store.clone();
             let collection = collection_name.clone();
+            let existing_ids = existing_row_ids.clone();
             let permit = semaphore.clone().acquire_owned().await?;
 
             batch_handles.push(tokio::spawn(async move {
@@ -604,11 +611,17 @@ async fn run_index_codebase(
                     })
                     .collect();
 
-                // Rows for unchanged chunk ids were deleted by this run's
-                // targeted cleanup, so insert is correct and avoids the
-                // delete-then-insert cycle that Milvus upsert performs.
+                // A modified file can retain a stable chunk ID. Refresh those
+                // primary keys with upsert so Milvus cannot retain the old row
+                // and append a duplicate; genuinely new IDs use insert.
                 let mut inserted = 0usize;
-                for rows in insert_rows.chunks(MILVUS_BATCH_SIZE) {
+                let (refresh_rows, new_rows): (Vec<_>, Vec<_>) = insert_rows
+                    .into_iter()
+                    .partition(|row| existing_ids.contains(&row.id));
+                for rows in refresh_rows.chunks(MILVUS_BATCH_SIZE) {
+                    inserted += vs.upsert_batch(&collection, rows).await?;
+                }
+                for rows in new_rows.chunks(MILVUS_BATCH_SIZE) {
                     inserted += vs.insert_batch(&collection, rows).await?;
                 }
 
@@ -728,6 +741,7 @@ async fn run_index_codebase(
             collection_name: &collection_name,
             index_inputs: &index_inputs,
             files: &files,
+            indexed_relative_paths: &indexed_relative_paths,
             cached_fingerprints: cached_fingerprints.take(),
             current_chunk_ids_by_path: &current_chunk_ids_by_path,
             previous_chunk_ids: &previous_chunk_ids,
@@ -965,6 +979,7 @@ struct ManifestWrite<'a> {
     collection_name: &'a str,
     index_inputs: &'a IndexInputs,
     files: &'a [std::path::PathBuf],
+    indexed_relative_paths: &'a BTreeSet<String>,
     cached_fingerprints: Option<Vec<FileFingerprint>>,
     current_chunk_ids_by_path: &'a BTreeMap<String, Vec<String>>,
     previous_chunk_ids: &'a BTreeMap<String, Vec<String>>,
@@ -975,6 +990,7 @@ fn write_manifest(state: &IndexerState, path: &Path, write: ManifestWrite<'_>) -
         collection_name,
         index_inputs,
         files,
+        indexed_relative_paths,
         cached_fingerprints,
         current_chunk_ids_by_path,
         previous_chunk_ids,
@@ -984,6 +1000,7 @@ fn write_manifest(state: &IndexerState, path: &Path, write: ManifestWrite<'_>) -
             for fingerprint in &mut fingerprints {
                 fingerprint.chunk_ids = resolve_manifest_chunk_ids(
                     &fingerprint.relative_path,
+                    indexed_relative_paths,
                     current_chunk_ids_by_path,
                     previous_chunk_ids,
                 );
@@ -1013,42 +1030,17 @@ fn write_manifest(state: &IndexerState, path: &Path, write: ManifestWrite<'_>) -
 /// marks "its vectors were all deleted" instead of "unknown, delete by path".
 fn resolve_manifest_chunk_ids(
     relative_path: &str,
+    indexed_relative_paths: &BTreeSet<String>,
     current_chunk_ids_by_path: &BTreeMap<String, Vec<String>>,
     previous_chunk_ids: &BTreeMap<String, Vec<String>>,
 ) -> Option<Vec<String>> {
     if let Some(ids) = current_chunk_ids_by_path.get(relative_path) {
         return Some(ids.clone());
     }
-    previous_chunk_ids.get(relative_path).cloned()
-}
-
-/// Chunk IDs a partial reindex can keep as-is.
-///
-/// An ID is reusable only when the previous run recorded it for the same
-/// relative path, the current run still produces it, and this run is not
-/// rewriting that file. Anything else is re-embedded, so a missing or stale
-/// manifest entry degrades to extra work rather than a stale vector.
-fn unchanged_chunk_ids(
-    previous_chunk_ids: &BTreeMap<String, Vec<String>>,
-    current_chunk_ids_by_path: &BTreeMap<String, Vec<String>>,
-    stale_relative_paths: &[String],
-) -> BTreeSet<String> {
-    let stale: BTreeSet<&str> = stale_relative_paths.iter().map(String::as_str).collect();
-    let mut reusable = BTreeSet::new();
-    for (relative_path, previous_ids) in previous_chunk_ids {
-        if stale.contains(relative_path.as_str()) {
-            continue;
-        }
-        let Some(current_ids) = current_chunk_ids_by_path.get(relative_path) else {
-            continue;
-        };
-        for id in previous_ids {
-            if current_ids.contains(id) {
-                reusable.insert(id.clone());
-            }
-        }
+    if indexed_relative_paths.contains(relative_path) {
+        return Some(Vec::new());
     }
-    reusable
+    previous_chunk_ids.get(relative_path).cloned()
 }
 
 fn chunk_ids_by_path(chunks: &[CodeChunk]) -> BTreeMap<String, Vec<String>> {
@@ -1199,6 +1191,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn manifest_zero_chunk_files_do_not_inherit_previous_ids() {
+        let indexed = BTreeSet::from(["empty.md".to_string(), "kept.md".to_string()]);
+        let current = BTreeMap::from([("kept.md".to_string(), vec!["kept-id".to_string()])]);
+        let previous = BTreeMap::from([
+            ("empty.md".to_string(), vec!["old-id".to_string()]),
+            ("untouched.md".to_string(), vec!["untouched-id".to_string()]),
+        ]);
+
+        assert_eq!(
+            resolve_manifest_chunk_ids("empty.md", &indexed, &current, &previous),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            resolve_manifest_chunk_ids("kept.md", &indexed, &current, &previous),
+            Some(vec!["kept-id".to_string()])
+        );
+        assert_eq!(
+            resolve_manifest_chunk_ids("untouched.md", &indexed, &current, &previous),
+            Some(vec!["untouched-id".to_string()])
+        );
+    }
+
     impl MockHttpServer {
         /// Stop the mock server.
         ///
@@ -1315,6 +1330,7 @@ mod tests {
     /// assert which rows an incremental update actually tombstones.
     async fn spawn_recording_mock_milvus_server(
         deletes: Arc<Mutex<Vec<serde_json::Value>>>,
+        writes: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
     ) -> MockHttpServer {
         let has_collection = Arc::new(Mutex::new(false));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1341,16 +1357,23 @@ mod tests {
                 } else if request_line.contains("/v2/vectordb/entities/insert")
                     || request_line.contains("/v2/vectordb/entities/upsert")
                 {
-                    let count = serde_json::from_str::<serde_json::Value>(body)
-                        .ok()
-                        .and_then(|payload| {
-                            payload
-                                .get("data")
-                                .and_then(|d| d.as_array())
-                                .map(|rows| rows.len())
-                        })
+                    let payload = serde_json::from_str::<serde_json::Value>(body)
+                        .unwrap_or_else(|_| json!({"data": []}));
+                    let operation = if request_line.contains("/v2/vectordb/entities/upsert") {
+                        "upsert"
+                    } else {
+                        "insert"
+                    };
+                    writes
+                        .lock()
+                        .unwrap()
+                        .push((operation.to_string(), payload.clone()));
+                    let count = payload
+                        .get("data")
+                        .and_then(|data| data.as_array())
+                        .map(|rows| rows.len())
                         .unwrap_or(1);
-                    let accepted = if request_line.contains("/v2/vectordb/entities/upsert") {
+                    let accepted = if operation == "upsert" {
                         json!({ "upsertCount": count })
                     } else {
                         json!({ "insertCount": count })
@@ -1803,7 +1826,8 @@ mod tests {
         .unwrap();
 
         let deletes = Arc::new(Mutex::new(Vec::new()));
-        let milvus = spawn_recording_mock_milvus_server(deletes.clone()).await;
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let milvus = spawn_recording_mock_milvus_server(deletes.clone(), writes.clone()).await;
         let embedding = spawn_dynamic_mock_embedding_server().await;
 
         let state = make_test_indexer_state(root, &embedding.base_url, &milvus.base_url, 4);
@@ -1857,6 +1881,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_deleted_only_update_removes_vectors() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        let cache_dir = TempDir::new().unwrap();
+        let _cache_lock = set_test_cache_dir_async(cache_dir.path()).await;
+        fs::write(
+            root.join("deleted.rs"),
+            "pub fn gone() -> i32 {\n    3\n}\n",
+        )
+        .unwrap();
+
+        let deletes = Arc::new(Mutex::new(Vec::new()));
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let milvus = spawn_recording_mock_milvus_server(deletes.clone(), writes.clone()).await;
+        let embedding = spawn_dynamic_mock_embedding_server().await;
+        let state = make_test_indexer_state(root, &embedding.base_url, &milvus.base_url, 4);
+
+        index_codebase(&state, root, false).await.unwrap();
+        assert!(deletes.lock().unwrap().is_empty());
+        fs::remove_file(root.join("deleted.rs")).unwrap();
+        index_codebase(&state, root, false).await.unwrap();
+
+        let recorded = deletes.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1, "expected one delete, got {recorded:?}");
+        assert!(
+            recorded[0].get("ids").is_some(),
+            "deleted-only update must use primary keys: {recorded:?}"
+        );
+
+        embedding.wait().await;
+        milvus.wait().await;
+    }
+
+    #[tokio::test]
+    async fn test_incremental_update_upserts_surviving_chunk_ids() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        let cache_dir = TempDir::new().unwrap();
+        let _cache_lock = set_test_cache_dir_async(cache_dir.path()).await;
+        fs::write(
+            root.join("changing.rs"),
+            "pub fn keep_me() -> i32 {\n    1\n}\n\npub fn remove_me() -> i32 {\n    2\n}\n",
+        )
+        .unwrap();
+
+        let deletes = Arc::new(Mutex::new(Vec::new()));
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let milvus = spawn_recording_mock_milvus_server(deletes.clone(), writes.clone()).await;
+        let embedding = spawn_dynamic_mock_embedding_server().await;
+        let state = make_test_indexer_state(root, &embedding.base_url, &milvus.base_url, 4);
+
+        index_codebase(&state, root, false).await.unwrap();
+        writes.lock().unwrap().clear();
+        fs::write(
+            root.join("changing.rs"),
+            "pub fn keep_me() -> i32 {\n    1\n}\n",
+        )
+        .unwrap();
+        index_codebase(&state, root, false).await.unwrap();
+
+        let recorded_writes = writes.lock().unwrap().clone();
+        assert_eq!(
+            recorded_writes.len(),
+            1,
+            "expected one write, got {recorded_writes:?}"
+        );
+        assert_eq!(recorded_writes[0].0, "upsert");
+        assert_eq!(
+            recorded_writes[0]
+                .1
+                .get("data")
+                .and_then(|data| data.as_array())
+                .map(Vec::len),
+            Some(1),
+            "only the surviving chunk should be refreshed: {recorded_writes:?}"
+        );
+
+        embedding.wait().await;
+        milvus.wait().await;
+    }
+
+    #[tokio::test]
     async fn test_update_after_legacy_manifest_falls_back_to_path_delete() {
         let temp_dir = TempDir::new().unwrap();
         let root = temp_dir.path();
@@ -1869,7 +1975,8 @@ mod tests {
         .unwrap();
 
         let deletes = Arc::new(Mutex::new(Vec::new()));
-        let milvus = spawn_recording_mock_milvus_server(deletes.clone()).await;
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let milvus = spawn_recording_mock_milvus_server(deletes.clone(), writes.clone()).await;
         let embedding = spawn_dynamic_mock_embedding_server().await;
 
         let state = make_test_indexer_state(root, &embedding.base_url, &milvus.base_url, 4);
