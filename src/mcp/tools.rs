@@ -878,6 +878,12 @@ impl CodebaseTools {
 
 #[cfg(test)]
 mod tests {
+
+    /// How long a mock HTTP server waits for its next connection before exiting.
+    ///
+    /// Generous enough to survive scheduler pressure when the full test suite runs
+    /// in parallel; tests that need prompt teardown await the server explicitly.
+    const MOCK_SERVER_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
     use super::*;
     use std::collections::HashMap;
     use std::io;
@@ -903,8 +909,17 @@ mod tests {
     }
 
     impl MockHttpServer {
+        /// Stop the mock server.
+        ///
+        /// The accept loop is aborted instead of awaited: it is only a socket
+        /// with canned responses, and awaiting it would block for the whole
+        /// idle timeout. The timeout itself is the safety net for tests that
+        /// never reach this method, which is what previously made unrelated
+        /// tests fail under full parallel load with "failed to prepare vector
+        /// collection".
         async fn wait(self) {
-            self.handle.await.unwrap();
+            self.handle.abort();
+            let _ = self.handle.await;
         }
     }
 
@@ -934,8 +949,7 @@ mod tests {
             let mut served_requests = 0usize;
             loop {
                 let accept =
-                    tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
-                        .await;
+                    tokio::time::timeout(MOCK_SERVER_IDLE_TIMEOUT, listener.accept()).await;
                 let Ok(Ok((mut stream, _))) = accept else {
                     break;
                 };
@@ -1236,7 +1250,7 @@ mod tests {
                     }),
                 ),
                 (
-                    "/v2/vectordb/entities/upsert",
+                    "/v2/vectordb/entities/insert",
                     serde_json::json!({
                         "code": 0
                     }),

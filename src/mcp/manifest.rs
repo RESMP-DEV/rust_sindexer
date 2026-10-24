@@ -27,6 +27,10 @@ pub struct IndexInputs {
     pub embedding_passage_prefix_sha256: String,
     #[serde(default)]
     pub embedding_dimension: usize,
+    /// Chunk identity scheme. Zero is the implicit value in legacy manifests;
+    /// version 2 derives fallback IDs from content as well as position.
+    #[serde(default)]
+    pub chunk_identity_version: u16,
 }
 
 fn default_max_file_size() -> u64 {
@@ -58,6 +62,7 @@ impl IndexInputs {
                 format!("{:x}", Sha256::digest(embedding_passage_prefix.as_bytes()))
             },
             embedding_dimension,
+            chunk_identity_version: 2,
         }
     }
 }
@@ -66,6 +71,13 @@ impl IndexInputs {
 pub struct FileFingerprint {
     pub relative_path: String,
     pub sha256: String,
+    /// Chunk IDs produced by the previous run for this file.
+    ///
+    /// Absent in manifests written before targeted deletes existed. Callers
+    /// must treat absence as "unknown", not an empty set, and fall back to a
+    /// whole-file delete so chunks for a modified file cannot be orphaned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -121,6 +133,18 @@ impl ManifestStore {
         files: &[PathBuf],
     ) -> Result<()> {
         let fingerprints = fingerprint_files(path, files)?;
+        self.write_with_fingerprints(path, collection_name, inputs, fingerprints)
+    }
+
+    pub fn write_for_files_with_chunk_ids(
+        &self,
+        path: &Path,
+        collection_name: &str,
+        inputs: &IndexInputs,
+        files: &[PathBuf],
+        chunk_ids_by_path: &BTreeMap<String, Vec<String>>,
+    ) -> Result<()> {
+        let fingerprints = fingerprint_files_with_chunks(path, files, chunk_ids_by_path)?;
         self.write_with_fingerprints(path, collection_name, inputs, fingerprints)
     }
 
@@ -244,6 +268,19 @@ pub fn diff_manifest_against_files(
 }
 
 pub fn fingerprint_files(root: &Path, files: &[PathBuf]) -> Result<Vec<FileFingerprint>> {
+    fingerprint_files_with_chunks(root, files, &BTreeMap::new())
+}
+
+/// Fingerprint files and attach the chunk IDs each file currently produces.
+///
+/// Chunk IDs let the next incremental run delete only the chunks that truly
+/// disappeared, instead of tombstoning every vector of a modified file before
+/// rewriting it.
+pub fn fingerprint_files_with_chunks(
+    root: &Path,
+    files: &[PathBuf],
+    chunk_ids_by_path: &BTreeMap<String, Vec<String>>,
+) -> Result<Vec<FileFingerprint>> {
     debug!(root = %root.display(), file_count = files.len(), "fingerprinting files");
     let results: Vec<Result<FileFingerprint>> = files
         .par_iter()
@@ -258,8 +295,9 @@ pub fn fingerprint_files(root: &Path, files: &[PathBuf]) -> Result<Vec<FileFinge
             let mut hasher = Sha256::new();
             hasher.update(&contents);
             Ok(FileFingerprint {
-                relative_path,
+                relative_path: relative_path.clone(),
                 sha256: hex::encode(hasher.finalize()),
+                chunk_ids: chunk_ids_by_path.get(&relative_path).cloned(),
             })
         })
         .collect();
@@ -283,6 +321,63 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn legacy_manifests_without_chunk_ids_deserialize() {
+        let legacy = r#"{
+            "collection_name": "collection",
+            "inputs": {
+                "chunk_size": 512,
+                "overlap_lines": 3,
+                "min_chunk_lines": 5,
+                "target_chunk_lines": 50,
+                "extensions": ["rs"],
+                "ignore_patterns": [],
+                "embedding_passage_prefix_sha256": "",
+                "embedding_dimension": 384
+            },
+            "files": [{"relative_path": "src/keep.rs", "sha256": "abc"}]
+        }"#;
+        let manifest: IndexManifest = serde_json::from_str(legacy).unwrap();
+        assert_eq!(manifest.files[0].chunk_ids, None);
+        assert_eq!(manifest.inputs.chunk_identity_version, 0);
+        let current_inputs = IndexInputs {
+            chunk_identity_version: 2,
+            ..manifest.inputs.clone()
+        };
+        assert!(!manifest.matches_index_inputs("collection", &current_inputs));
+    }
+
+    #[test]
+    fn fingerprinting_attaches_chunk_ids_only_for_indexed_files() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("indexed.rs"), "fn indexed() {}\n").unwrap();
+        fs::write(src.join("untouched.rs"), "fn untouched() {}\n").unwrap();
+
+        let chunk_ids = BTreeMap::from([(
+            "src/indexed.rs".to_string(),
+            vec!["chunk-a".to_string(), "chunk-b".to_string()],
+        )]);
+        let files = vec![src.join("indexed.rs"), src.join("untouched.rs")];
+        let fingerprints = fingerprint_files_with_chunks(root, &files, &chunk_ids).unwrap();
+
+        let indexed = fingerprints
+            .iter()
+            .find(|fp| fp.relative_path == "src/indexed.rs")
+            .unwrap();
+        assert_eq!(
+            indexed.chunk_ids.as_deref(),
+            Some(["chunk-a".to_string(), "chunk-b".to_string()].as_slice())
+        );
+        let untouched = fingerprints
+            .iter()
+            .find(|fp| fp.relative_path == "src/untouched.rs")
+            .unwrap();
+        assert_eq!(untouched.chunk_ids, None);
+    }
+
+    #[test]
     fn diff_reports_added_modified_and_deleted_files() {
         let temp = tempdir().unwrap();
         let root = temp.path();
@@ -302,6 +397,7 @@ mod tests {
             follow_symlinks: false,
             embedding_passage_prefix_sha256: String::new(),
             embedding_dimension: 384,
+            chunk_identity_version: 2,
         };
 
         let previous = IndexManifest {
@@ -311,10 +407,12 @@ mod tests {
                 FileFingerprint {
                     relative_path: "src/keep.rs".into(),
                     sha256: "old".into(),
+                    chunk_ids: None,
                 },
                 FileFingerprint {
                     relative_path: "src/deleted.rs".into(),
                     sha256: "gone".into(),
+                    chunk_ids: None,
                 },
             ],
         };
@@ -347,6 +445,7 @@ mod tests {
             follow_symlinks: false,
             embedding_passage_prefix_sha256: String::new(),
             embedding_dimension: 384,
+            chunk_identity_version: 2,
         };
         let store = ManifestStore;
         let files = vec![src.join("lib.rs")];

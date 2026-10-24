@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -101,18 +101,37 @@ impl LocalStore {
         debug!(
             collection = collection_name,
             docs = count,
-            "Inserting docs into local store"
+            "Upserting docs into local store"
         );
         let mut collections = self.collections.lock();
         let collection = collections
             .entry(collection_name.to_string())
             .or_insert_with(|| self.load_collection(collection_name).unwrap_or_default());
-        collection.docs.extend(docs);
+
+        // Replace existing ids in place and append the rest, so a repeated
+        // chunk id overwrites its row instead of duplicating it. This mirrors
+        // the Milvus upsert contract the CLI and MCP paths rely on.
+        let mut positions: HashMap<String, usize> = collection
+            .docs
+            .iter()
+            .enumerate()
+            .map(|(index, doc)| (doc.id.clone(), index))
+            .collect();
+        for doc in docs {
+            match positions.get(&doc.id).copied() {
+                Some(index) => collection.docs[index] = doc,
+                None => {
+                    positions.insert(doc.id.clone(), collection.docs.len());
+                    collection.docs.push(doc);
+                }
+            }
+        }
+
         self.persist_collection(collection_name, collection)?;
         debug!(
             collection = collection_name,
             total_docs = collection.docs.len(),
-            "Insert completed"
+            "Local upsert completed"
         );
         Ok(())
     }
@@ -225,6 +244,31 @@ impl LocalStore {
         self.load_collection(name)
             .map(|c| c.docs.len())
             .unwrap_or(0)
+    }
+
+    pub fn delete_by_ids(&self, collection_name: &str, chunk_ids: &[String]) -> Result<()> {
+        debug!(
+            collection = collection_name,
+            chunks = chunk_ids.len(),
+            "Deleting docs by chunk id"
+        );
+        let ids: BTreeSet<_> = chunk_ids.iter().map(String::as_str).collect();
+        let mut collections = self.collections.lock();
+        let collection = match collections.get_mut(collection_name) {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+        let before = collection.docs.len();
+        collection.docs.retain(|doc| !ids.contains(doc.id.as_str()));
+        let deleted = before - collection.docs.len();
+        debug!(
+            collection = collection_name,
+            deleted,
+            remaining = collection.docs.len(),
+            "Chunk-id delete applied"
+        );
+        self.persist_collection(collection_name, collection)?;
+        Ok(())
     }
 
     pub fn delete_by_filter(&self, collection_name: &str, relative_paths: &[String]) -> Result<()> {

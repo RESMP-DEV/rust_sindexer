@@ -6,6 +6,8 @@ pub use local::LocalStore;
 
 use anyhow::Result;
 use sha2::{Digest, Sha256};
+
+use crate::vectordb::client::milvus_id_for_chunk_id;
 use std::borrow::Cow;
 use std::env;
 use std::path::Path;
@@ -65,6 +67,27 @@ impl VectorStore {
         }
     }
 
+    pub async fn insert_batch(&self, collection: &str, data: &[InsertRow]) -> Result<usize> {
+        debug!(collection, batch_size = data.len(), "inserting batch");
+        match self {
+            Self::Local(store) => {
+                let docs: Vec<_> = data
+                    .iter()
+                    .map(|row| local::LocalDoc {
+                        id: row.id.to_string(),
+                        content: row.content.clone(),
+                        vector: row.vector.clone(),
+                        metadata: row.metadata.clone(),
+                    })
+                    .collect();
+                let inserted = docs.len();
+                store.insert_docs(collection, docs)?;
+                Ok(inserted)
+            }
+            Self::Milvus(client) => client.insert_batch(collection, data).await,
+        }
+    }
+
     pub async fn search(
         &self,
         collection: &str,
@@ -112,6 +135,38 @@ impl VectorStore {
             Self::Milvus(client) => {
                 let filter = build_relative_path_milvus_filter(relative_paths);
                 client.delete(collection, &filter).await
+            }
+        }
+    }
+
+    /// Delete only the listed chunk primary keys.
+    ///
+    /// This is the preferred incremental-update path. A whole-file delete
+    /// tombstones every chunk that is about to be upserted again; a primary-key
+    /// delete touches only chunks whose stable IDs disappeared.
+    pub async fn delete_by_ids(&self, collection: &str, chunk_ids: &[String]) -> Result<()> {
+        if chunk_ids.is_empty() {
+            return Ok(());
+        }
+        debug!(
+            collection,
+            chunk_count = chunk_ids.len(),
+            "deleting by chunk ids"
+        );
+        match self {
+            Self::Local(store) => {
+                let ids = chunk_ids
+                    .iter()
+                    .map(|id| milvus_id_for_chunk_id(id).to_string())
+                    .collect::<Vec<_>>();
+                store.delete_by_ids(collection, &ids)
+            }
+            Self::Milvus(client) => {
+                let ids = chunk_ids
+                    .iter()
+                    .map(|id| milvus_id_for_chunk_id(id))
+                    .collect::<Vec<_>>();
+                client.delete_by_ids(collection, &ids).await
             }
         }
     }
@@ -243,6 +298,33 @@ fn identity_prefix(identity: &str) -> Option<&str> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn local_delete_by_ids_matches_insert_primary_keys() {
+        let collection = format!("test_{}", uuid::Uuid::new_v4());
+        let store = VectorStore::Local(LocalStore::new());
+        store.create_collection(&collection, 1).await.unwrap();
+        let chunk_id = "src/a.rs:fallback:abc".to_string();
+        let row = InsertRow {
+            id: milvus_id_for_chunk_id(&chunk_id),
+            content: "hello".to_string(),
+            vector: vec![1.0],
+            metadata: serde_json::json!({"relative_path": "src/a.rs"}),
+        };
+        store.insert_batch(&collection, &[row]).await.unwrap();
+        assert_eq!(
+            store.collection_stats(&collection).await.unwrap().row_count,
+            1
+        );
+
+        store.delete_by_ids(&collection, &[chunk_id]).await.unwrap();
+
+        assert_eq!(
+            store.collection_stats(&collection).await.unwrap().row_count,
+            0
+        );
+        store.drop_collection(&collection).await.unwrap();
+    }
 
     #[test]
     fn test_collection_name_basic() {
