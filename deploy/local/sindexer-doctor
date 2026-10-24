@@ -37,7 +37,7 @@ $HOME/mimo-rl-observer $HOME/modelctl-rs $HOME/modelctl
 $HOME/azure-workflows $HOME/resmp-reprocessor
 $HOME/ventoy-stick $HOME/kimi $HOME/lapis
 $HOME/ccr-rust
-$HOME/AlphaHENG/contrib/rust_sindexer $HOME/AlphaHENG
+$HOME/rust_sindexer $HOME/AlphaHENG
 $HOME/ZCode $HOME/codex
 "
 FRESH_WARN_DAYS=7

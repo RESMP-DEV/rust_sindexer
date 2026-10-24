@@ -21,7 +21,7 @@ ordered; verify each before moving on.
 
    ```bash
    git clone git@github.com:RESMP-DEV/rust_sindexer.git \
-     ~/AlphaHENG/contrib/rust_sindexer
+     ~/rust_sindexer
    ```
 
    A different path works but orphans existing collections for this repo;
