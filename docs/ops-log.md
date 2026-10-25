@@ -62,3 +62,29 @@ Non-claims and open items (updated as work completes):
   in place as a cold backup; containers are stopped with restart
   policy `no` at cutover. B550's stack is preserved untouched until
   its single collection is backed up and the box is decommissioned.
+
+Overnight blocker (2026-10-24 ~12:10 through 2026-10-25 09:00): both
+compute boxes reject every NEW TCP connection over ZeroTier with an
+immediate ICMP destination-unreachable (verified by receive-counter
+delta: exactly one per attempt) while ESTABLISHED sessions keep
+flowing — the Mac->Strix embed tunnel (connected 2026-10-24 11:07) has
+stayed alive across the entire block, including a NAT re-derivation
+on the boxes' WAN (peer UDP ports changed). Clean single attempts
+after a 7.5-hour probe-free window (09:00 2026-10-25) also failed, so
+a ban timer is ruled out; the block is structural at the boxes
+(firewall REJECT rule or a wedged ZeroTier client on each box; both
+boxes share fleet config management). All Mac-side lanes are
+exhausted: ZeroTier overlay (new sessions refused), LAN 192.168.1.x
+(separate subnet, unrouted), relays (no client-side control), GCP
+fleet box (address unknown, loc-infra records no infra role),
+mosh/b550-jump (need SSH first). Remaining paths need a human at the
+boxes (inspect crowdsec/ufw/nftables, restart zerotier) or a
+user-authorized restart of the Mac's ZeroTier daemon (root). The
+restore watcher stays armed: it fires automatically when any Strix
+tunnel attempt succeeds.
+
+Repo note (2026-10-25): this checkout moved from
+`~/AlphaHENG/contrib/rust_sindexer` to `~/rust_sindexer` mid-task by
+the parallel branch-consolidation process (PR #22 merge); the deploy
+commit was re-applied and amended at the new root
+(`fb2f7b0` on `docs/agents-fullscale-setup`).
